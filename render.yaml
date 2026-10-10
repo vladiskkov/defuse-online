@@ -18,6 +18,6 @@ services:
         generateValue: true
       # Client ID публічний (він і так видно на сторінці), секрет не потрібен
       - key: GOOGLE_CLIENT_ID
-        value: 96122002055-12t0takn8c80cb4u530epn1ti05lh8v8.apps.googleusercontent.com
+        value: 96122002055-bst37felsi73raed1plqsag2bprp7i0h.apps.googleusercontent.com
       - key: ALLOW_GUESTS
         value: "true"
