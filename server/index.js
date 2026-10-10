@@ -104,6 +104,8 @@ io.on('connection', (socket) => {
   on('game:refund', () => room ? room.refund(uid) : { ok: false });
   on('game:buyReady', ({ ready }) => room && room.buyReady(uid, ready));
   on('game:plan', (plan) => room ? room.plan(uid, plan) : { ok: false });
+  on('duel:act', (data) => room ? room.duelAct(uid, data) : { ok: false });
+  on('duel:roll', () => room ? room.duelRoll(uid) : { ok: false });
   on('sync', () => { if (room) room.sendTo(uid); });
 
   socket.on('disconnect', () => {

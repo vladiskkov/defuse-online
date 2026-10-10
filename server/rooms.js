@@ -1,11 +1,11 @@
 // Кімнати: лобі, місця в командах, боти, таймери фаз матчу.
 import crypto from 'node:crypto';
 import { Match } from './game/engine.js';
-import { botBuy, botPlan } from './game/bot.js';
+import { botBuy, botAct } from './game/bot.js';
 import * as R from '../shared/rules.js';
 
 const BOT_NAMES = ['Сашко', 'Марічка', 'Тарас', 'Оксана', 'Богдан', 'Ярина', 'Остап', 'Леся', 'Петро', 'Зоя'];
-const REPLAY_MS = (R.MAX_STEPS + 2) * 650 + 800; // скільки клієнт показує повтор ходу
+const REPLAY_MS = 4200; // скільки клієнт показує повтор ходу чи дуелі
 const ROUND_OVER_MS = 6000;
 
 export class Rooms {
@@ -220,23 +220,26 @@ class Room {
     const m = this.match;
     m.startRound();
     for (const p of m.players) if (p.isBot) { botBuy(m, p); p.ready = true; }
-    this.schedule(R.BUY_SECONDS * 1000, () => this.startPlanning());
+    this.schedule(R.BUY_SECONDS * 1000, () => this.startPhase());
     this.broadcast();
   }
 
-  startPlanning() {
+  // початок фази руху або дуелі: боти діють одразу, людям — таймер
+  startPhase(afterReplay = false) {
     const m = this.match;
     if (m.phase === 'buy') m.endBuy();
-    this.planBots();
-    this.schedule(R.PLAN_SECONDS * 1000 + (m.turn > 1 ? REPLAY_MS : 0), () => this.resolve());
+    this.botsAct();
+    const secs = m.phase === 'duel' ? R.DUEL_SECONDS : R.PLAN_SECONDS;
+    this.phaseOpensAt = Date.now() + (afterReplay ? REPLAY_MS : 0);
+    this.schedule(secs * 1000 + (afterReplay ? REPLAY_MS : 0), () => this.resolve());
     this.broadcast();
     this.maybeAdvance();
   }
 
-  planBots() {
+  botsAct() {
     const m = this.match;
     for (const p of m.players) if (p.isBot && p.alive) {
-      try { m.setPlan(p.id, { ...botPlan(m, p), ready: true }); } catch (e) { console.error('bot', e); m.setPlan(p.id, { mode: 'hold', ready: true }); }
+      try { botAct(m, p); } catch (e) { console.error('bot', e); if (m.phase === 'move') m.setPlan(p.id, { ready: true }); else m.autoDuel(p); }
     }
   }
 
@@ -246,32 +249,27 @@ class Room {
     const humans = m.players.filter((p) => !p.isBot && p.connected);
     if (!humans.length) return; // нікого немає — чекаємо таймера
     if (m.phase === 'buy' && humans.every((p) => p.ready)) {
-      // невелика пауза, щоб усі побачили, що закупівля закінчилась
-      this.schedule(600, () => this.startPlanning());
-    } else if (m.phase === 'plan' && m.allReady()) {
-      // якщо всі живі люди готові — розігруємо
-      const minWait = Math.max(0, this.planStartedAt ? this.planStartedAt - Date.now() : 0);
-      this.schedule(Math.max(300, minWait), () => this.resolve());
+      this.schedule(600, () => this.startPhase());
+    } else if ((m.phase === 'move' || m.phase === 'duel') && m.allReady()) {
+      // не розігруємо, поки клієнти ще показують повтор попередньої фази
+      const wait = Math.max(400, (this.phaseOpensAt || 0) - Date.now());
+      this.schedule(wait, () => this.resolve());
     }
   }
 
   resolve() {
     const m = this.match;
-    if (!m || m.phase !== 'plan') return;
+    if (!m || (m.phase !== 'move' && m.phase !== 'duel')) return;
     this.clearTimer();
     let result;
-    try { result = m.resolveTurn(); } catch (e) { console.error('resolve failed', e); return; }
+    try { result = m.phase === 'move' ? m.resolveMove() : m.resolveDuel(); } catch (e) { console.error('resolve failed', e); return; }
     this.seq += 1;
     if (result.roundEnd) {
       this.broadcast();
       if (m.phase === 'over') { this.deadline = 0; return; }
       this.schedule(REPLAY_MS + ROUND_OVER_MS, () => this.nextRound());
     } else {
-      this.planBots();
-      // повтор ходу триває кілька секунд — у цей час уже можна планувати
-      this.planStartedAt = Date.now() + 1500;
-      this.schedule(R.PLAN_SECONDS * 1000 + REPLAY_MS, () => this.resolve());
-      this.broadcast();
+      this.startPhase(true);
     }
   }
 
@@ -292,7 +290,7 @@ class Room {
   }
   plan(uid, plan) {
     const m = this.match;
-    if (!m || m.phase !== 'plan') return { ok: false };
+    if (!m || m.phase !== 'move') return { ok: false };
     const p = m.get(uid);
     if (!p || p.isBot) return { ok: false };
     const r = m.setPlan(uid, plan);
@@ -302,6 +300,22 @@ class Room {
     this.broadcastLight();
     this.maybeAdvance();
     return { ok: true, plan: r.plan };
+  }
+  duelAct(uid, data) {
+    const m = this.match;
+    if (!m || m.phase !== 'duel') return { ok: false, error: 'Дуель уже закінчилась' };
+    const r = m.duelAct(uid, data || {});
+    if (r.ok) this.sendTo(uid);
+    return r;
+  }
+  duelRoll(uid) {
+    const m = this.match;
+    if (!m || m.phase !== 'duel') return { ok: false };
+    const r = m.duelRoll(uid);
+    if (!r.ok) return r;
+    this.broadcastLight();
+    this.maybeAdvance();
+    return r;
   }
 
   /* ---------- розсилка ---------- */
@@ -328,8 +342,9 @@ class Room {
       v.ready = me.ready;
       v.teamPlans = Object.fromEntries(m.players.filter((q) => q.squad === me.squad && q.id !== uid && q.plan).map((q) => [q.id, q.plan]));
     }
-    v.readyCount = m.players.filter((p) => !p.isBot && p.alive && p.ready).length;
-    v.humanCount = m.players.filter((p) => !p.isBot && p.alive).length;
+    const waiting = m.phase === 'duel' ? m.players.filter((p) => !p.isBot && p.alive && p.duel) : m.players.filter((p) => !p.isBot && p.alive);
+    v.readyCount = waiting.filter((p) => (m.phase === 'duel' ? p.duel.ready : p.ready)).length;
+    v.humanCount = waiting.length;
     return v;
   }
 
@@ -344,7 +359,7 @@ class Room {
   broadcastLight() {
     const m = this.match;
     if (!m) return;
-    const ready = Object.fromEntries(m.players.map((p) => [p.id, !!p.ready]));
+    const ready = Object.fromEntries(m.players.map((p) => [p.id, m.phase === 'duel' ? !!(p.duel && p.duel.ready) : !!p.ready]));
     for (const uid of this.sockets.keys()) this.emitTo(uid, 'ready', { ready, seq: this.seq });
   }
 

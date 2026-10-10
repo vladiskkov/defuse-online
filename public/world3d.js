@@ -589,6 +589,17 @@ export class World3D {
     return { x: Math.floor(p.x), y: Math.floor(p.z) };
   }
 
+  // точка на землі під екранною точкою (для рамки на радарі)
+  pickGround(px, py) {
+    const ndc = new THREE.Vector2((px / this.W) * 2 - 1, -(py / this.H) * 2 + 1);
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const ray = this.raycaster.ray;
+    if (ray.direction.y > -1e-4) return null;
+    const t = -ray.origin.y / ray.direction.y;
+    const p = ray.origin.clone().addScaledVector(ray.direction, t);
+    return { x: p.x, z: p.z };
+  }
+
   render(now) {
     this.updateCamera(now);
     this.updateFx(now);
