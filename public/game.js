@@ -1,7 +1,8 @@
-// Клієнт гри: карта на canvas, планування ходу, повтор подій з кубиками, закупівля.
+// Клієнт гри: 3D-карта, планування ходу, повтор подій з кубиками, закупівля.
 import { Grid, dist, cheb } from '/shared/geom.js';
 import { DUNE } from '/shared/map.js';
 import * as R from '/shared/rules.js';
+import { World3D } from './world3d.js';
 
 const TICK_MS = 650;
 const T_END = R.MAX_STEPS + 1;
@@ -18,13 +19,20 @@ export class Game {
   constructor({ emit, toast, onLobby }) {
     this.emit = emit; this.toast = toast; this.onLobby = onLobby;
     this.grid = new Grid(DUNE);
-    this.canvas = $('canvas');
-    this.ctx = this.canvas.getContext('2d');
+    this.labels = $('canvas');
+    this.lctx = this.labels.getContext('2d');
     this.board = $('board');
+    try {
+      this.world = new World3D(this.board, this.grid, { mobile: matchMedia('(pointer: coarse)').matches });
+    } catch (e) {
+      console.error(e);
+      this.toast('Ваш браузер не підтримує 3D (WebGL). Спробуйте Chrome або Safari останньої версії.');
+      throw e;
+    }
     this.view = null;
     this.seq = -1;
     this.offset = 0;
-    this.cam = { x: 18, y: 14, s: 24, init: false };
+    this.camInit = false;
     this.plan = this.freshPlan();
     this.planKey = '';
     this.tool = 'move';
@@ -35,7 +43,6 @@ export class Game {
     this.effects = [];
     this.buyOpen = false;
     this.fogCache = null;
-    this.staticMap = this.renderStatic();
     this.bindInput();
     this.bindUi();
     new ResizeObserver(() => this.resize()).observe(this.board);
@@ -83,9 +90,9 @@ export class Game {
     if (v.phase === 'buy' && (!prev || prev.phase !== 'buy' || prev.round !== v.round)) {
       this.buyOpen = !!(this.me);
       this.teamPlans = {};
-      if (!this.cam.init || (prev && prev.round !== v.round)) this.centerOnMe();
+      if (!this.camInit || (prev && prev.round !== v.round)) this.centerOnMe();
     }
-    if (!this.cam.init && this.me) this.centerOnMe();
+    if (!this.camInit && this.me) this.centerOnMe();
     if (v.phase !== 'buy') this.buyOpen = false;
     this.renderHud();
     this.renderPanel();
@@ -178,10 +185,14 @@ export class Game {
     for (const e of events) {
       if (e.type === 'shot') {
         const a = { x: e.fx, y: e.fy }, b = { x: e.tx, y: e.ty };
-        this.effects.push({ type: 'shot', a, b, hit: e.hit, head: e.head, start: now + 250 + k * 120, dur: 1500, label: `🎲${e.roll}${e.acc >= 0 ? '+' : ''}${e.acc}=${e.total} / ${e.need}`, dmg: e.hit ? (e.head ? '💀 ' : '−') + e.dmg : 'мимо' });
+        this.world.addShot(a, b, e.hit, now + 250 + k * 120);
+        this.effects.push({ type: 'shot', from: e.from, a, b, hit: e.hit, head: e.head, start: now + 250 + k * 120, dur: 1500, label: `🎲${e.roll}${e.acc >= 0 ? '+' : ''}${e.acc}=${e.total} / ${e.need}`, dmg: e.hit ? (e.head ? '💀 ' : '−') + e.dmg : 'мимо' });
         k++;
       } else if (e.type === 'nade') {
-        this.effects.push({ type: 'nade', nade: e.nade, x: e.x, y: e.y, from: e.fx !== null && e.fx !== undefined ? { x: e.fx, y: e.fy } : null, start: now, dur: 1200 });
+        const from = e.fx !== null && e.fx !== undefined ? { x: e.fx, y: e.fy } : null;
+        if (from) this.world.addThrow(from, { x: e.x, y: e.y }, e.nade, now);
+        this.world.addBlast(e.nade, e.x, e.y, now + (from ? 380 : 0));
+        if (e.nade === 'flash' && this.me && (e.blinded || []).includes(this.me.id)) this.effects.push({ type: 'whiteout', start: now + 380, dur: 1400 });
       } else if (e.type === 'kill') {
         this.effects.push({ type: 'kill', x: e.x, y: e.y, start: now + 400, dur: 1800 });
       } else if (e.type === 'planted' || e.type === 'exploded' || e.type === 'defused') {
@@ -193,56 +204,34 @@ export class Game {
   /* ================= ввід ================= */
   resize() {
     const r = this.board.getBoundingClientRect();
+    if (!r.width || !r.height) return;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     this.W = r.width; this.H = r.height; this.dpr = dpr;
-    this.canvas.width = Math.round(r.width * dpr); this.canvas.height = Math.round(r.height * dpr);
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.fit = Math.min(r.width / this.grid.w, r.height / this.grid.h);
-    if (!this.cam.init) this.cam.s = Math.max(this.fit, Math.min(30, r.width < 600 ? 26 : this.fit));
-    this.clampCam();
+    this.labels.width = Math.round(r.width * dpr); this.labels.height = Math.round(r.height * dpr);
+    this.lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.world.resize(r.width, r.height);
+    if (!this.camInit && this.me) this.centerOnMe();
   }
 
-  // плавно перевести камеру до точки, якщо вона поза центром екрана
-  follow(x, y) {
-    if (!this.W) return;
-    const c = this.cam;
-    const hw = this.W / c.s / 2, hh = this.H / c.s / 2;
-    if (Math.abs(x + 0.5 - c.x) < hw * 0.6 && Math.abs(y + 0.5 - c.y) < hh * 0.6) return;
-    this.camAnim = { fx: c.x, fy: c.y, tx: x + 0.5, ty: y + 0.5, start: performance.now() };
-  }
+  follow(x, y) { if (this.W) this.world.follow(x, y); }
 
   centerOnMe() {
     if (!this.me || this.me.x === undefined || !this.W) return;
-    this.cam.init = true;
-    this.cam.s = this.W < 600 ? 26 : Math.max(this.fit, 22);
-    this.cam.x = this.me.x + 0.5; this.cam.y = this.me.y + 0.5;
-    this.clampCam();
-  }
-
-  clampCam() {
-    const c = this.cam;
-    c.s = Math.max(this.fit * 0.95, Math.min(56, c.s));
-    const hw = this.W / c.s / 2, hh = this.H / c.s / 2;
-    c.x = hw * 2 >= this.grid.w ? this.grid.w / 2 : Math.max(hw, Math.min(this.grid.w - hw, c.x));
-    c.y = hh * 2 >= this.grid.h ? this.grid.h / 2 : Math.max(hh, Math.min(this.grid.h - hh, c.y));
-  }
-
-  toTile(px, py) {
-    const c = this.cam;
-    return { x: Math.floor((px - this.W / 2) / c.s + c.x), y: Math.floor((py - this.H / 2) / c.s + c.y) };
+    this.camInit = true;
+    this.world.centerOn(this.me.x, this.me.y, this.W < 600 ? 19 : 22);
   }
 
   bindInput() {
     const pts = new Map();
     let drag = null, pinch = null;
-    const cv = this.canvas;
+    const cv = this.labels;
     cv.addEventListener('pointerdown', (e) => {
       cv.setPointerCapture(e.pointerId);
       pts.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
-      if (pts.size === 1) drag = { x: e.offsetX, y: e.offsetY, cx: this.cam.x, cy: this.cam.y, moved: false };
+      if (pts.size === 1) drag = { x: e.offsetX, y: e.offsetY, lx: e.offsetX, ly: e.offsetY, moved: false };
       if (pts.size === 2) {
         const [a, b] = [...pts.values()];
-        pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), s: this.cam.s };
+        pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 };
         drag = null;
       }
     });
@@ -251,27 +240,31 @@ export class Game {
       pts.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
       if (pinch && pts.size === 2) {
         const [a, b] = [...pts.values()];
-        this.cam.s = pinch.s * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d;
-        this.clampCam();
+        const d = Math.hypot(a.x - b.x, a.y - b.y), cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+        if (pinch.d > 0) this.world.zoom(d / pinch.d);
+        this.world.pan(cx - pinch.cx, cy - pinch.cy);
+        pinch = { d, cx, cy };
       } else if (drag) {
-        const dx = e.offsetX - drag.x, dy = e.offsetY - drag.y;
-        if (Math.hypot(dx, dy) > 8) drag.moved = true;
-        if (drag.moved) { this.cam.x = drag.cx - dx / this.cam.s; this.cam.y = drag.cy - dy / this.cam.s; this.clampCam(); }
+        if (Math.hypot(e.offsetX - drag.x, e.offsetY - drag.y) > 8) drag.moved = true;
+        if (drag.moved) { this.world.pan(e.offsetX - drag.lx, e.offsetY - drag.ly); drag.lx = e.offsetX; drag.ly = e.offsetY; }
       }
     });
     const up = (e) => {
       if (!pts.has(e.pointerId)) return;
       pts.delete(e.pointerId);
-      if (drag && !drag.moved && pts.size === 0) this.tap(this.toTile(e.offsetX, e.offsetY));
+      if (drag && !drag.moved && pts.size === 0) { const t = this.world.pick(e.offsetX, e.offsetY); if (t) this.tap(t); }
       if (pts.size < 2) pinch = null;
       drag = null;
     };
     cv.addEventListener('pointerup', up);
     cv.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); drag = null; pinch = null; });
-    cv.addEventListener('wheel', (e) => { e.preventDefault(); this.cam.s *= e.deltaY < 0 ? 1.12 : 1 / 1.12; this.clampCam(); }, { passive: false });
-    $('zoomIn').onclick = () => { this.cam.s *= 1.25; this.clampCam(); };
-    $('zoomOut').onclick = () => { this.cam.s /= 1.25; this.clampCam(); };
+    cv.addEventListener('wheel', (e) => { e.preventDefault(); this.world.zoom(e.deltaY < 0 ? 1.12 : 1 / 1.12); }, { passive: false });
+    $('zoomIn').onclick = () => this.world.zoom(1.25);
+    $('zoomOut').onclick = () => this.world.zoom(1 / 1.25);
     $('zoomMe').onclick = () => this.centerOnMe();
+    $('rotL').onclick = () => this.world.rotate(-1);
+    $('rotR').onclick = () => this.world.rotate(1);
+    $('topView').onclick = () => { const top = this.world.toggleTop(); $('topView').classList.toggle('on', top); };
   }
 
   bindUi() {
@@ -368,57 +361,6 @@ export class Game {
   }
 
   /* ================= малювання ================= */
-  // розмір шрифту в клітинках, але не дрібніше за minPx пікселів на екрані
-  fs(units, minPx) { return Math.max(units, minPx / this.cam.s); }
-
-  renderStatic() {
-    const S = 32;
-    const c = document.createElement('canvas');
-    c.width = this.grid.w * S; c.height = this.grid.h * S;
-    const g = c.getContext('2d');
-    let seed = 7;
-    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
-    for (let y = 0; y < this.grid.h; y++) for (let x = 0; x < this.grid.w; x++) {
-      const ch = this.grid.at(x, y);
-      const X = x * S, Y = y * S;
-      if (ch === '#') {
-        g.fillStyle = '#2a241c'; g.fillRect(X, Y, S, S);
-        continue;
-      }
-      const v = Math.floor(rnd() * 10);
-      g.fillStyle = `rgb(${196 + v},${164 + v},${112 + v})`;
-      g.fillRect(X, Y, S, S);
-      if (ch === 'A' || ch === 'B') { g.fillStyle = 'rgba(200,60,40,.16)'; g.fillRect(X, Y, S, S); }
-      if (ch === 'T') { g.fillStyle = 'rgba(240,162,58,.13)'; g.fillRect(X, Y, S, S); }
-      if (ch === 'C') { g.fillStyle = 'rgba(90,167,232,.15)'; g.fillRect(X, Y, S, S); }
-      g.strokeStyle = 'rgba(0,0,0,.06)'; g.strokeRect(X + 0.5, Y + 0.5, S - 1, S - 1);
-      if (ch === 'b') {
-        g.fillStyle = '#8a6136'; g.fillRect(X + 3, Y + 3, S - 6, S - 6);
-        g.strokeStyle = '#5e4022'; g.lineWidth = 2; g.strokeRect(X + 4, Y + 4, S - 8, S - 8);
-        g.beginPath(); g.moveTo(X + 4, Y + 4); g.lineTo(X + S - 4, Y + S - 4); g.moveTo(X + S - 4, Y + 4); g.lineTo(X + 4, Y + S - 4); g.stroke();
-        g.lineWidth = 1;
-      }
-    }
-    // тіні стін
-    for (let y = 0; y < this.grid.h; y++) for (let x = 0; x < this.grid.w; x++) {
-      if (this.grid.at(x, y) !== '#') continue;
-      const X = x * S, Y = y * S;
-      g.fillStyle = '#3a3226';
-      if (this.grid.at(x, y + 1) !== '#') g.fillRect(X, Y + S - 6, S, 6);
-      g.fillStyle = 'rgba(0,0,0,.25)';
-      if (this.grid.at(x, y + 1) !== '#') g.fillRect(X, Y + S, S, 4);
-    }
-    // літери точок
-    g.font = `700 ${S * 3}px Oswald, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillStyle = 'rgba(150,40,30,.28)';
-    for (const ch of ['A', 'B']) {
-      const ts = this.grid.tilesOf(ch);
-      const cx = ts.reduce((a, t) => a + t.x, 0) / ts.length + 0.5, cy = ts.reduce((a, t) => a + t.y, 0) / ts.length + 0.5;
-      g.fillText(ch === 'A' ? 'A' : 'Б', cx * S, cy * S);
-    }
-    return c;
-  }
-
   fog() {
     if (this.fogCache) return this.fogCache;
     const v = this.view;
@@ -430,146 +372,188 @@ export class Game {
     const mates = v.players.filter((p) => p.squad === this.me.squad && p.alive && p.x !== undefined);
     for (let y = 0; y < this.grid.h; y++) for (let x = 0; x < this.grid.w; x++) {
       if (this.grid.opaque(x, y)) continue;
-      for (const m of mates) if (Math.abs(m.x - x) + Math.abs(m.y - y) < 40 && this.grid.los(m.x, m.y, x, y, sm)) { set[x + y * this.grid.w] = 1; break; }
+      for (const m of mates) if (this.grid.los(m.x, m.y, x, y, sm)) { set[x + y * this.grid.w] = 1; break; }
     }
     return (this.fogCache = set);
   }
 
-  draw() {
-    const ctx = this.ctx, c = this.cam, v = this.view;
-    if (!this.W) return;
-    if (this.camAnim) {
-      const a = this.camAnim, k = Math.min(1, (performance.now() - a.start) / 600), e = 1 - Math.pow(1 - k, 3);
-      c.x = a.fx + (a.tx - a.fx) * e; c.y = a.fy + (a.ty - a.fy) * e; this.clampCam();
-      if (k >= 1) this.camAnim = null;
-    }
-    ctx.fillStyle = '#120f0b';
-    ctx.fillRect(0, 0, this.W, this.H);
-    ctx.save();
-    ctx.translate(this.W / 2, this.H / 2);
-    ctx.scale(c.s, c.s);
-    ctx.translate(-c.x, -c.y);
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(this.staticMap, 0, 0, this.grid.w, this.grid.h);
-    if (!v) { ctx.restore(); return; }
-    const now = performance.now();
-    const replaying = this.replaying;
-    const rpos = replaying ? this.replayPositions() : null;
-
-    // туман
+  // що малюємо на підлозі: туман, досяжні клітинки, маршрути, сліди, привиди
+  drawFloor(ctx) {
+    const v = this.view;
+    if (!v) return;
+    const replaying = !!this.replay;
     const fog = !replaying && v.phase !== 'roundOver' && v.phase !== 'over' ? this.fog() : null;
     if (fog) {
-      ctx.fillStyle = 'rgba(10,8,5,.5)';
-      for (let y = 0; y < this.grid.h; y++) for (let x = 0; x < this.grid.w; x++) if (!fog[x + y * this.grid.w] && !this.grid.opaque(x, y)) ctx.fillRect(x, y, 1, 1);
-    }
-
-    // підписи зон
-    if (c.s > 15) {
-      ctx.font = `600 ${this.fs(0.42, 10)}px Inter, sans-serif`; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(60,40,20,.55)';
-      for (const co of DUNE.callouts) if (co.lx) ctx.fillText(co.name.toUpperCase(), co.lx, co.ly);
-    }
-
-    // дим і вогонь (під час повтору — стан до ходу, поки граната не впала)
-    const smokes = replaying && this.replayTime() < TICK_MS * 0.6 ? this.replay.prevSmokes : v.smokes;
-    const fires = replaying && this.replayTime() < TICK_MS * 0.6 ? this.replay.prevFires : v.fires;
-    for (const f of fires || []) for (const k of f.tiles) {
-      const [x, y] = k.split(',').map(Number);
-      ctx.fillStyle = `rgba(240,${90 + 40 * Math.sin(now / 150 + x + y)},30,.55)`;
-      ctx.fillRect(x, y, 1, 1);
-    }
-    for (const s of smokes || []) {
-      for (const k of s.tiles) {
-        const [x, y] = k.split(',').map(Number);
-        ctx.fillStyle = 'rgba(200,200,200,.82)';
-        ctx.beginPath(); ctx.arc(x + 0.5, y + 0.5, 0.72, 0, Math.PI * 2); ctx.fill();
+      const smoke = new Set();
+      for (const s of v.smokes || []) for (const k of s.tiles) smoke.add(k);
+      ctx.fillStyle = 'rgba(20,14,8,.42)';
+      for (let y = 0; y < this.grid.h; y++) for (let x = 0; x < this.grid.w; x++) {
+        if (!fog[x + y * this.grid.w] && !this.grid.opaque(x, y) && !smoke.has(x + ',' + y)) ctx.fillRect(x, y, 1, 1);
       }
     }
-
-    // планування: досяжні клітинки, гранати
     if (!replaying && this.canPlan()) this.drawPlanning(ctx);
-
-    // бомба
-    const b = v.bomb;
-    if (b && (b.state === 'planted' || b.state === 'dropped')) {
-      const pulse = b.state === 'planted' ? 0.15 * Math.sin(now / 200) : 0;
-      ctx.fillStyle = '#d33'; ctx.strokeStyle = '#300'; ctx.lineWidth = 0.06;
-      ctx.beginPath(); ctx.roundRect(b.x + 0.25 - pulse / 2, b.y + 0.3 - pulse / 2, 0.5 + pulse, 0.4 + pulse, 0.08); ctx.fill(); ctx.stroke();
-      if (b.state === 'planted') {
-        ctx.fillStyle = '#fff'; ctx.font = '700 0.32px Oswald, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(b.timer, b.x + 0.5, b.y + 0.51);
-      }
-    }
-
-    // шум
     for (const n of this.noises) {
-      const ph = (now / 900) % 1;
-      ctx.strokeStyle = `rgba(239,106,90,${0.8 - ph * 0.7})`; ctx.lineWidth = 0.07;
-      ctx.beginPath(); ctx.arc(n.x + 0.5, n.y + 0.5, 0.3 + ph * 0.7, 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = 'rgba(239,106,90,.9)'; ctx.font = '0.42px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('👣', n.x + 0.5, n.y + 0.5);
+      ctx.strokeStyle = 'rgba(239,90,70,.85)'; ctx.lineWidth = 0.07;
+      for (const r of [0.3, 0.55]) { ctx.beginPath(); ctx.arc(n.x + 0.5, n.y + 0.5, r, 0, Math.PI * 2); ctx.stroke(); }
+      ctx.font = '0.4px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+      ctx.fillText('👣', n.x + 0.5, n.y + 0.52);
     }
-
-    // привиди (де бачили ворога)
     if (!replaying && this.me) for (const [id, g] of this.ghosts) {
       const p = this.byId[id];
       if (!p || p.visible || !p.alive || g.round !== v.round) continue;
       const age = v.turn - g.turn;
       if (age > 3) continue;
-      ctx.globalAlpha = 0.55 - age * 0.12;
-      ctx.strokeStyle = COLORS[p.side]; ctx.lineWidth = 0.07; ctx.setLineDash([0.12, 0.1]);
-      ctx.beginPath(); ctx.arc(g.x + 0.5, g.y + 0.5, 0.34, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
-      ctx.fillStyle = COLORS[p.side]; ctx.font = '700 0.4px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('?', g.x + 0.5, g.y + 0.52);
+      ctx.globalAlpha = 0.85 - age * 0.18;
+      ctx.strokeStyle = COLORS[p.side]; ctx.lineWidth = 0.08; ctx.setLineDash([0.14, 0.1]);
+      ctx.beginPath(); ctx.arc(g.x + 0.5, g.y + 0.5, 0.36, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = COLORS[p.side]; ctx.font = '700 0.46px Inter, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('?', g.x + 0.5, g.y + 0.53);
       ctx.globalAlpha = 1;
     }
-
-    // плани команди
     if (!replaying && v.phase === 'plan') {
       for (const [id, pl] of Object.entries(this.teamPlans)) {
         const p = this.byId[id];
         if (!p || !p.alive || p.x === undefined || !pl) continue;
-        this.drawPath(ctx, p, pl, COLORS[p.side], 0.45);
+        this.drawPath(ctx, p, pl, COLORS[p.side], 0.6);
       }
       if (this.canPlan()) this.drawPath(ctx, this.me, this.plan, '#fff', 1);
     }
+  }
 
-    // гравці
-    for (const p of v.players) {
-      let pos;
-      if (rpos) {
-        pos = rpos[p.id];
-        if (!pos) continue;
-        if (pos.dead) { this.drawBody(ctx, pos, p); continue; }
-      } else {
-        if (p.x === undefined || (!p.visible && p.squad !== this.me?.squad)) continue;
-        if (!p.alive) { this.drawBody(ctx, p, p); continue; }
-        pos = p;
+  floorKey() {
+    const v = this.view;
+    if (!v) return '';
+    return [v.seq, v.phase, !!this.replay, this.tool, JSON.stringify(this.plan), JSON.stringify(this.teamPlans), this.noises.length, this.ghosts.size, this.me && this.me.x, this.me && this.me.y].join('|');
+  }
+
+  draw() {
+    if (!this.W) return;
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - (this.lastFrame || now)) / 1000);
+    this.lastFrame = now;
+    const v = this.view;
+    this.frame = [];
+    if (v) {
+      const replaying = this.replaying;
+      const rpos = replaying ? this.replayPositions() : null;
+      // хто в кого цілиться саме зараз
+      const aim = {};
+      for (const e of this.effects) if (e.type === 'shot' && now >= e.start - 300 && now < e.start + 500) aim[e.from] = e.b;
+      for (const p of v.players) {
+        let pos, alive;
+        if (rpos) {
+          pos = rpos[p.id];
+          if (!pos) continue;
+          alive = !pos.dead;
+        } else {
+          if (p.x === undefined || (!p.visible && p.squad !== this.me?.squad)) continue;
+          pos = p; alive = p.alive;
+        }
+        const item = { id: p.id, name: p.name, side: p.side, x: pos.x, y: pos.y, alive, hp: p.hp, armor: p.armor || 0, bomb: p.bomb, me: this.me && p.id === this.me.id, mate: this.me && p.squad === this.me.squad };
+        if (aim[p.id]) { item.faceX = aim[p.id].x; item.faceY = aim[p.id].y; }
+        this.frame.push(item);
       }
-      this.drawPlayer(ctx, p, pos);
+      this.world.syncPlayers(this.frame, dt);
+      const early = replaying && this.replayTime() < TICK_MS * 0.6;
+      this.world.syncSmokes(early ? this.replay.prevSmokes : v.smokes);
+      this.world.syncFires(early ? this.replay.prevFires : v.fires);
+      this.world.syncBomb(v.bomb);
+      const key = this.floorKey();
+      if (key !== this.floorDrawn) { this.floorDrawn = key; this.world.drawOverlay((ctx) => this.drawFloor(ctx)); }
     }
+    this.world.render(now);
+    this.drawLabels(now);
+  }
 
+  // написи поверх 3D: імена, здоров'я, кубики, підписи зон
+  drawLabels(now) {
+    const ctx = this.lctx, w = this.world, v = this.view;
+    ctx.clearRect(0, 0, this.W, this.H);
+    if (!v) return;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+    // зони карти
+    if (w.view.dist < 30) {
+      ctx.font = '600 11px Inter, sans-serif';
+      for (const co of DUNE.callouts) {
+        if (!co.lx) continue;
+        const s = w.project(co.lx, 0.05, co.ly);
+        if (s.behind || s.x < -50 || s.x > this.W + 50 || s.y < -20 || s.y > this.H + 20) continue;
+        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(240,225,190,.55)'; ctx.strokeText(co.name.toUpperCase(), s.x, s.y);
+        ctx.fillStyle = 'rgba(70,45,20,.85)'; ctx.fillText(co.name.toUpperCase(), s.x, s.y);
+      }
+    }
+    // гравці
+    for (const p of this.frame) {
+      if (!p.alive) continue;
+      const pos = w.playerPos(p.id);
+      if (!pos) continue;
+      const s = w.project(pos.x, 1.42, pos.z);
+      if (s.behind) continue;
+      const nm = p.name.length > 12 ? p.name.slice(0, 11) + '…' : p.name;
+      ctx.font = `600 ${p.me ? 12 : 11}px Inter, sans-serif`;
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,.65)'; ctx.strokeText(nm, s.x, s.y - 10);
+      ctx.fillStyle = p.me ? '#fff' : COLORS[p.side]; ctx.fillText(nm, s.x, s.y - 10);
+      if (p.hp !== undefined) {
+        ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(s.x - 17, s.y - 2, 34, 5);
+        ctx.fillStyle = p.hp > 50 ? '#7fcf6a' : p.hp > 25 ? '#e8c33d' : '#ef6a5a';
+        ctx.fillRect(s.x - 17, s.y - 2, 34 * p.hp / 100, 5);
+      }
+      if (p.bomb) { ctx.font = '12px sans-serif'; ctx.fillText('💣', s.x + 26, s.y - 4); }
+    }
+    // таймер бомби
+    const b = v.bomb;
+    if (b && b.state === 'planted') {
+      const s = w.project(b.x + 0.5, 0.6, b.y + 0.5);
+      ctx.font = '700 14px Oswald, sans-serif';
+      ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(s.x - 22, s.y - 11, 44, 20);
+      ctx.fillStyle = '#ff5a4a'; ctx.fillText(`💣 ${b.timer}`, s.x, s.y);
+    }
     // ефекти
     this.effects = this.effects.filter((e) => now < e.start + e.dur);
-    for (const e of this.effects) this.drawEffect(ctx, e, now);
-    ctx.restore();
+    for (const e of this.effects) {
+      const k = (now - e.start) / e.dur;
+      if (k < 0) continue;
+      ctx.save();
+      if (e.type === 'shot') {
+        const s = w.project(e.b.x + 0.5, 1.5, e.b.y + 0.5);
+        const y = s.y - 26 - k * 30;
+        ctx.globalAlpha = Math.min(1, 2.5 * (1 - k));
+        ctx.font = '700 14px Oswald, sans-serif'; ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,.85)';
+        ctx.strokeText(e.label, s.x, y - 20); ctx.fillStyle = '#ffe08a'; ctx.fillText(e.label, s.x, y - 20);
+        ctx.font = '700 19px Oswald, sans-serif';
+        ctx.strokeText(e.dmg, s.x, y); ctx.fillStyle = e.hit ? '#ff6b5a' : '#e6e6e6'; ctx.fillText(e.dmg, s.x, y);
+      } else if (e.type === 'kill') {
+        const s = w.project(e.x + 0.5, 1.2, e.y + 0.5);
+        ctx.globalAlpha = 1 - k; ctx.font = '26px sans-serif';
+        ctx.fillText('💀', s.x, s.y - 20 - k * 25);
+      } else if (e.type === 'banner') {
+        ctx.globalAlpha = Math.min(1, 3 * (1 - k));
+        ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 40, this.W, 50);
+        ctx.font = '700 28px Oswald, sans-serif'; ctx.fillStyle = '#ff6b5a'; ctx.fillText(e.text, this.W / 2, 66);
+      } else if (e.type === 'whiteout') {
+        ctx.globalAlpha = Math.max(0, 1 - k) * 0.9;
+        ctx.fillStyle = '#fffef4'; ctx.fillRect(0, 0, this.W, this.H);
+      }
+      ctx.restore();
+    }
   }
 
   drawPlanning(ctx) {
     const me = this.me;
     if (this.tool !== 'move') {
-      const g = R.GRENADES[this.tool];
       for (let y = me.y - 8; y <= me.y + 8; y++) for (let x = me.x - 8; x <= me.x + 8; x++) {
         if (this.grid.opaque(x, y) || !this.validThrow(x, y)) continue;
-        ctx.fillStyle = 'rgba(255,230,120,.28)'; ctx.fillRect(x + 0.1, y + 0.1, 0.8, 0.8);
+        ctx.fillStyle = 'rgba(255,220,90,.35)'; ctx.fillRect(x + 0.1, y + 0.1, 0.8, 0.8);
       }
       return;
     }
     const reach = this.reachable();
     if (reach) {
-      ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 0.04;
-      ctx.fillStyle = 'rgba(255,255,255,.12)';
+      ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.lineWidth = 0.05;
+      ctx.fillStyle = 'rgba(255,255,255,.2)';
       for (const i of reach) {
         const x = i % this.grid.w, y = (i / this.grid.w) | 0;
+        if (this.grid.isBox(x, y)) continue;
         ctx.fillRect(x + 0.1, y + 0.1, 0.8, 0.8); ctx.strokeRect(x + 0.1, y + 0.1, 0.8, 0.8);
       }
     }
@@ -601,83 +585,6 @@ export class Game {
     const tag = plan.action === 'plant' ? '💣' : plan.action === 'defuse' ? '✂' : plan.mode === 'hold' ? '◉' : plan.mode === 'dodge' ? '↯' : '';
     if (tag) { ctx.font = '0.42px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = color; ctx.fillText(tag, p.x + 0.5, p.y - 0.25); }
     ctx.globalAlpha = 1;
-  }
-
-  drawPlayer(ctx, p, pos) {
-    const isMe = this.me && p.id === this.me.id;
-    const col = COLORS[p.side];
-    const x = pos.x + 0.5, y = pos.y + 0.5;
-    ctx.fillStyle = 'rgba(0,0,0,.35)';
-    ctx.beginPath(); ctx.ellipse(x, y + 0.3, 0.32, 0.12, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = col;
-    ctx.beginPath(); ctx.arc(x, y, 0.36, 0, Math.PI * 2); ctx.fill();
-    ctx.lineWidth = isMe ? 0.09 : 0.05; ctx.strokeStyle = isMe ? '#fff' : 'rgba(0,0,0,.6)'; ctx.stroke();
-    ctx.fillStyle = '#1b1712'; ctx.font = '700 0.32px Oswald, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(p.side === 'T' ? 'T' : 'CT', x, y + 0.02);
-    if (p.bomb) { ctx.fillStyle = '#d33'; ctx.fillRect(x + 0.18, y - 0.42, 0.24, 0.18); }
-    if (p.hp !== undefined && p.alive) {
-      ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(x - 0.38, y + 0.42, 0.76, 0.09);
-      ctx.fillStyle = p.hp > 50 ? '#7fcf6a' : p.hp > 25 ? '#e8c33d' : '#ef6a5a';
-      ctx.fillRect(x - 0.38, y + 0.42, 0.76 * p.hp / 100, 0.09);
-    }
-    if (this.cam.s > 14) {
-      const f = this.fs(0.28, 10);
-      ctx.font = `600 ${f}px Inter, sans-serif`; ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,.7)'; ctx.lineWidth = f * 0.28;
-      const nm = p.name.length > 10 ? p.name.slice(0, 9) + '…' : p.name;
-      ctx.strokeText(nm, x, y - 0.55); ctx.fillText(nm, x, y - 0.55);
-    }
-  }
-
-  drawBody(ctx, pos, p) {
-    const x = pos.x + 0.5, y = pos.y + 0.5;
-    ctx.strokeStyle = COLORS[p.side]; ctx.globalAlpha = 0.6; ctx.lineWidth = 0.1;
-    ctx.beginPath(); ctx.moveTo(x - 0.22, y - 0.22); ctx.lineTo(x + 0.22, y + 0.22); ctx.moveTo(x + 0.22, y - 0.22); ctx.lineTo(x - 0.22, y + 0.22); ctx.stroke();
-    ctx.globalAlpha = 1;
-  }
-
-  drawEffect(ctx, e, now) {
-    const k = (now - e.start) / e.dur;
-    if (k < 0) return;
-    ctx.save();
-    if (e.type === 'shot') {
-      const a = e.a, b = e.b;
-      if (k < 0.25) {
-        ctx.strokeStyle = e.hit ? 'rgba(255,240,150,.95)' : 'rgba(255,255,255,.5)'; ctx.lineWidth = 0.05;
-        const ox = e.hit ? 0 : 0.35;
-        ctx.beginPath(); ctx.moveTo(a.x + 0.5, a.y + 0.5); ctx.lineTo(b.x + 0.5 + ox, b.y + 0.5 - ox); ctx.stroke();
-      }
-      ctx.globalAlpha = Math.min(1, 2.5 * (1 - k));
-      const tx = b.x + 0.5, ty = b.y - 0.15 - k * 0.6;
-      const f1 = this.fs(0.36, 13), f2 = this.fs(0.5, 17);
-      ctx.font = `700 ${f1}px Oswald, sans-serif`; ctx.textAlign = 'center'; ctx.lineWidth = f1 * 0.28; ctx.strokeStyle = 'rgba(0,0,0,.85)';
-      ctx.strokeText(e.label, tx, ty - f2 * 0.8); ctx.fillStyle = '#ffe08a'; ctx.fillText(e.label, tx, ty - f2 * 0.8);
-      ctx.font = `700 ${f2}px Oswald, sans-serif`;
-      ctx.strokeText(e.dmg, tx, ty + 0.05); ctx.fillStyle = e.hit ? '#ff6b5a' : '#ddd'; ctx.fillText(e.dmg, tx, ty + 0.05);
-    } else if (e.type === 'nade') {
-      const r = R.GRENADES[e.nade].radius + 0.5;
-      if (e.from && k < 0.3) {
-        const q = k / 0.3;
-        const x = e.from.x + (e.x - e.from.x) * q + 0.5, y = e.from.y + (e.y - e.from.y) * q + 0.5 - Math.sin(q * Math.PI) * 1.2;
-        ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(x, y, 0.12, 0, Math.PI * 2); ctx.fill();
-      } else {
-        const q = Math.min(1, (k - 0.3) / 0.7);
-        ctx.globalAlpha = 1 - q;
-        ctx.fillStyle = e.nade === 'flash' ? '#fffbe0' : e.nade === 'he' ? '#ff7a3a' : e.nade === 'molly' ? '#ff9a2a' : '#ddd';
-        ctx.beginPath(); ctx.arc(e.x + 0.5, e.y + 0.5, r * (0.4 + q * 0.6), 0, Math.PI * 2); ctx.fill();
-      }
-    } else if (e.type === 'kill') {
-      ctx.globalAlpha = 1 - k;
-      ctx.font = '0.9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('💀', e.x + 0.5, e.y - 0.2 - k * 0.5);
-    } else if (e.type === 'banner') {
-      ctx.restore(); ctx.save();
-      ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-      ctx.globalAlpha = Math.min(1, 3 * (1 - k));
-      ctx.font = '700 28px Oswald, sans-serif'; ctx.textAlign = 'center';
-      ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 40, this.W, 50);
-      ctx.fillStyle = '#ff6b5a'; ctx.fillText(e.text, this.W / 2, 75);
-    }
-    ctx.restore();
   }
 
   /* ================= інтерфейс ================= */

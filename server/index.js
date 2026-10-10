@@ -3,6 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
+import compression from 'compression';
 import { Server } from 'socket.io';
 import { mountAuth, userFromCookieHeader } from './auth.js';
 import { Rooms } from './rooms.js';
@@ -11,6 +12,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+app.use(compression());
 app.use(express.json({ limit: '16kb' }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -22,6 +24,7 @@ app.use((req, res, next) => {
 app.get('/healthz', (req, res) => res.send('ok'));
 mountAuth(app);
 app.use('/shared', express.static(path.join(root, '../shared'), { maxAge: '1h' }));
+app.use('/vendor/three', express.static(path.join(root, '../node_modules/three/build'), { maxAge: '7d' }));
 app.use(express.static(path.join(root, '../public'), { maxAge: '1h', extensions: ['html'] }));
 
 const server = http.createServer(app);

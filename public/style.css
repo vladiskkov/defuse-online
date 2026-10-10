@@ -97,8 +97,13 @@ input:focus { outline: 2px solid var(--sand2); border-color: transparent; }
 .hud .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .timer { font: 700 20px Oswald, sans-serif; min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
 .timer.low { color: var(--bad); }
-.board { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #120f0b; touch-action: none; }
+.board { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #d9c4a0; touch-action: none; }
 canvas { display: block; width: 100%; height: 100%; }
+.board canvas { position: absolute; inset: 0; }
+#canvas { z-index: 1; touch-action: none; }
+.zoom, .feed, .logbtn { z-index: 2; }
+.icon.small-t { font: 700 12px Inter, sans-serif; }
+.icon.on { background: var(--sand); color: #1b1712; }
 .zoom { position: absolute; right: 8px; top: 8px; display: grid; gap: 6px; }
 .zoom .icon { background: rgba(36, 31, 24, .9); }
 .logbtn { position: absolute; left: 8px; bottom: 8px; background: rgba(36, 31, 24, .9); border: 1px solid var(--line); color: var(--text); border-radius: 9px; padding: 6px 10px; font: 600 12px Inter, sans-serif; cursor: pointer; }

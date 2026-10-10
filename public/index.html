@@ -114,6 +114,9 @@
         <button class="icon" id="zoomIn" aria-label="Наблизити">+</button>
         <button class="icon" id="zoomOut" aria-label="Віддалити">−</button>
         <button class="icon" id="zoomMe" aria-label="До мене">◎</button>
+        <button class="icon" id="rotL" aria-label="Повернути ліворуч">⟲</button>
+        <button class="icon" id="rotR" aria-label="Повернути праворуч">⟳</button>
+        <button class="icon small-t" id="topView" aria-label="Вид згори">2D</button>
       </div>
       <div class="feed" id="feed"></div>
       <button class="logbtn" id="logBtn">Журнал</button>
@@ -130,6 +133,7 @@
   </section>
 
   <div class="toast" id="toast" hidden></div>
+  <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.js" } }</script>
   <script src="/socket.io/socket.io.min.js"></script>
   <script type="module" src="/app.js"></script>
 </body>
