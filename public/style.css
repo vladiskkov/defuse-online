@@ -222,3 +222,43 @@ canvas { display: block; width: 100%; height: 100%; }
 .tip .btn { justify-self: end; }
 .rules-mini { font-size: 13px; color: #dccfb9; margin-top: 8px; }
 .rules-mini p { margin: 6px 0; }
+
+/* ===== настільний режим ===== */
+.hearts { color: #ff5a5a; letter-spacing: 1px; font-size: 15px; white-space: nowrap; }
+.hearts .lost { color: rgba(255,90,90,.25); }
+.where { font-size: 14px; color: var(--muted); }
+.where b { color: var(--text); }
+.moves { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.mv { background: var(--card); border: 1px solid var(--line); color: var(--text); border-radius: 12px; padding: 12px 10px; font: 600 15px Inter, sans-serif; text-align: left; cursor: pointer; }
+.mv.on { background: var(--sand); color: #1b1712; border-color: var(--sand); }
+.mv.hold small { display: block; font-weight: 400; font-size: 11px; opacity: .8; }
+.btn.chosen { background: #5a3b16; border-color: var(--sand); color: var(--sand); }
+.btn.big.plant, .btn.big.defuse { width: 100%; }
+.vs { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; }
+.vs-x { font: 700 18px Oswald, sans-serif; color: #ff5a4a; }
+.foes { display: grid; gap: 6px; }
+.fighter { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; display: grid; gap: 2px; text-align: left; color: var(--text); font: inherit; }
+.fighter.me { border-color: rgba(255,255,255,.35); }
+.fighter.foe.on { border-color: #ff5a4a; box-shadow: inset 0 0 0 1px #ff5a4a; }
+.fighter:disabled { opacity: 1; cursor: default; }
+.fighter .fn { font-weight: 700; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fighter .fw { font-size: 12px; color: var(--muted); }
+.fighter .chance { font: 600 12px Inter, sans-serif; color: var(--sand); }
+.mods { display: flex; flex-wrap: wrap; gap: 3px; }
+.mod { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: #3a3226; }
+.mod.up { color: #9be08a; } .mod.down { color: #ff8a7a; }
+.btn.retreat { width: 100%; text-align: center; }
+.btn.retreat small { display: block; font-weight: 400; font-size: 11px; color: var(--muted); }
+.d6 { font-size: 28px; line-height: 1; color: #f3ead6; display: inline-block; }
+.d6.big { font-size: 64px; }
+.d6.rolling { animation: dieRoll .3s linear infinite; }
+.sum-big { font: 700 34px Oswald, sans-serif; color: var(--sand); margin-left: 8px; }
+.dc-zone { font: 700 14px Oswald, sans-serif; color: #ff6b5a; text-transform: uppercase; letter-spacing: .5px; }
+.dc-rolls { display: grid; gap: 4px; }
+.dc-roll { display: grid; grid-template-columns: minmax(70px, 1fr) auto auto 34px; gap: 8px; align-items: center; background: rgba(255,255,255,.04); border-radius: 8px; padding: 2px 8px; }
+.dc-roll.mine { background: rgba(255,255,255,.1); }
+.dc-roll .who { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-roll .sum { font: 700 22px Oswald, sans-serif; color: var(--sand); text-align: right; }
+.dc-line { font-size: 13px; padding: 4px 8px; border-left: 3px solid #6b5e4b; }
+.dc-line.hit { border-left-color: #ff5a4a; }
+.dc-line .hs { color: #ffd36b; }

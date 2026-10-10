@@ -380,12 +380,22 @@ export class World3D {
       let o = this.players.get(p.id);
       if (!o || o.side !== p.side) { if (o) this.scene.remove(o.grp); o = this.makePlayer(p.side); this.players.set(p.id, o); }
       const tx = p.x + 0.5, tz = p.y + 0.5;
-      if (o.x === null || Math.hypot(tx - o.x, tz - o.z) > 3) { o.x = tx; o.z = tz; }
-      // плавне наближення до позиції та повороту
-      const k = Math.min(1, dt * 14);
-      const dx = tx - o.x, dz = tz - o.z;
-      if (Math.hypot(dx, dz) > 0.02) o.wantYaw = Math.atan2(-dx, -dz);
-      o.x += dx * k; o.z += dz * k;
+      if (o.x === null || p.snap) { o.x = tx; o.z = tz; o.route = null; o.goal = null; }
+      // нова ціль — ідемо по клітинках у обхід стін
+      if (!o.goal || o.goal.x !== p.x || o.goal.y !== p.y) {
+        o.goal = { x: p.x, y: p.y };
+        const path = this.grid.path(Math.floor(o.x), Math.floor(o.z), p.x, p.y);
+        o.route = path ? path.map((t) => ({ x: t.x + 0.5, z: t.y + 0.5 })) : [{ x: tx, z: tz }];
+      }
+      let budget = dt * 7; // клітинок за секунду
+      while (o.route && o.route.length && budget > 0) {
+        const w = o.route[0];
+        const dx = w.x - o.x, dz = w.z - o.z, d = Math.hypot(dx, dz);
+        if (d > 0.01) o.wantYaw = Math.atan2(-dx, -dz);
+        if (d <= budget) { o.x = w.x; o.z = w.z; budget -= d; o.route.shift(); }
+        else { o.x += dx / d * budget; o.z += dz / d * budget; budget = 0; }
+      }
+      o.walking = !!(o.route && o.route.length);
       if (p.faceX !== undefined) o.wantYaw = Math.atan2(-(p.faceX + 0.5 - o.x), -(p.faceY + 0.5 - o.z));
       if (o.wantYaw !== undefined) {
         let d = o.wantYaw - o.yaw; while (d > Math.PI) d -= Math.PI * 2; while (d < -Math.PI) d += Math.PI * 2;
@@ -404,7 +414,6 @@ export class World3D {
         o.body.rotation.set(Math.PI / 2, o.yaw, 0, 'YXZ');
         o.body.position.y = 0.16;
         o.gun.visible = false;
-        for (const m of o.mats) m.color.multiplyScalar(1); // кольори лишаємо
         o.grp.traverse((c) => { if (c.material) { c.material.transparent = true; c.material.opacity = 0.75; } });
       } else {
         o.body.position.y = 0;
@@ -415,6 +424,8 @@ export class World3D {
     }
     for (const [id, o] of this.players) if (!seen.has(id)) o.grp.visible = false;
   }
+
+  anyWalking() { for (const o of this.players.values()) if (o.grp.visible && o.walking) return true; return false; }
 
   playerPos(id) { const o = this.players.get(id); return o && o.grp.visible ? { x: o.x, z: o.z } : null; }
 

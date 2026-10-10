@@ -1,25 +1,21 @@
-// Рушій матчу «Дефуз».
-// Раунд: закупівля → ходи руху → (контакт) → дуелі → … → кінець раунду.
+// Рушій настільного «Дефузу».
+// Раунд: закупівля → ходи (усі одночасно обирають дію) → перестрілки в зонах → … → кінець раунду.
 // Чистий код без мережі: кімната (rooms.js) керує таймерами і розсилає стани.
-import { Grid, dist, cheb } from '../../shared/geom.js';
 import * as R from '../../shared/rules.js';
-import { DUNE } from '../../shared/map.js';
+import { ZONES, ZONE } from '../../shared/zones.js';
 
-export const MAPS = { dune: DUNE };
 const SIDES = ['T', 'CT'];
+const d6 = (rng) => 1 + Math.floor(rng() * 6);
 const NADE_ORDER = ['smoke', 'molly', 'flash', 'he'];
-const d20 = (rng) => 1 + Math.floor(rng() * 20);
 
 export class Match {
-  constructor({ players, mapId = 'dune', rng = Math.random }) {
-    this.map = MAPS[mapId];
-    this.grid = new Grid(this.map);
+  constructor({ players, rng = Math.random }) {
     this.rng = rng;
     this.players = players.map((p) => ({
       id: p.id, name: p.name, isBot: !!p.isBot, squad: p.squad,
-      money: R.ECONOMY.start, hp: R.HP, alive: true, x: 0, y: 0,
-      pistol: null, primary: null, armor: 0, kit: false,
-      nades: { he: 0, flash: 0, smoke: 0, molly: 0 },
+      money: R.ECONOMY.start, hp: R.HP, alive: true, zone: null, prev: null,
+      pistol: null, primary: null, armor: 0, vestUp: false, kit: false,
+      nades: { flash: 0, smoke: 0, he: 0, molly: 0 },
       bomb: false, kills: 0, deaths: 0, connected: true,
     }));
     this.score = [0, 0];
@@ -39,34 +35,19 @@ export class Match {
   squadOfSide(side) { return (side === 'T') === (this.half === 0) ? 0 : 1; }
   team(side) { return this.players.filter((p) => this.sideOf(p) === side); }
   aliveOf(side) { return this.team(side).filter((p) => p.alive); }
-  enemies(p) { return this.players.filter((q) => q.alive && q.squad !== p.squad); }
   weaponId(p) { return p.primary || p.pistol; }
   weapon(p) { return R.WEAPONS[this.weaponId(p)]; }
-  smokeAt(x, y) { return this.smokeTiles.has(x + ',' + y); }
-  fireAt(x, y) { return this.fireTiles.has(x + ',' + y); }
-  los(a, b) { return this.grid.los(a.x, a.y, b.x, b.y, (x, y) => this.smokeAt(x, y)); }
-  visibleEnemies(p) { return this.enemies(p).filter((q) => this.los(p, q)); }
+  inZone(zone) { return this.players.filter((p) => p.alive && p.zone === zone); }
+  enemiesIn(p, zone = p.zone) { return this.inZone(zone).filter((q) => q.squad !== p.squad); }
   nadeCount(p) { return Object.values(p.nades).reduce((a, b) => a + b, 0); }
-  inDuel(p) { return this.phase === 'duel' && !!p.duel; }
-
-  rebuildAreas() {
-    this.smokeTiles = new Set();
-    for (const s of this.smokes) for (const k of s.tiles) this.smokeTiles.add(k);
-    this.fireTiles = new Set();
-    for (const f of this.fires) for (const k of f.tiles) this.fireTiles.add(k);
+  smoked(zone) { return (this.smokes[zone] || 0) > 0; }
+  burning(zone) { return this.fires[zone] && this.fires[zone].turns > 0; }
+  contested(zone) {
+    if (this.smoked(zone)) return false;
+    const here = this.inZone(zone);
+    return here.some((p) => p.squad === 0) && here.some((p) => p.squad === 1);
   }
-
-  areaTiles(cx, cy, radius, round) {
-    const out = [];
-    const r = Math.ceil(radius);
-    for (let y = cy - r; y <= cy + r; y++) for (let x = cx - r; x <= cx + r; x++) {
-      if (this.grid.opaque(x, y)) continue;
-      const inside = round ? Math.hypot(x - cx, y - cy) <= radius + 0.3 : cheb({ x, y }, { x: cx, y: cy }) <= radius;
-      if (!inside || !this.grid.los(cx, cy, x, y)) continue;
-      out.push(x + ',' + y);
-    }
-    return out;
-  }
+  get clock() { return Math.max(0, R.ROUND_TIME - Math.max(0, this.turn - 1) * R.TURN_SECONDS); }
 
   /* ---------- раунд ---------- */
   startRound() {
@@ -75,32 +56,23 @@ export class Match {
     const pistolRound = this.round === 1 || this.round === R.ROUNDS_TOTAL / 2 + 1;
     this.phase = 'buy';
     this.turn = 0;
-    this.duelRound = 0;
-    this.clock = R.ROUND_TIME;
-    this.smokes = []; this.fires = [];
-    this.rebuildAreas();
-    this.bomb = { state: 'carried', x: 0, y: 0, clock: 0, progress: 0, defuser: null, site: null };
+    this.fightRound = 0;
+    this.smokes = {}; this.fires = {};
+    this.bomb = { state: 'carried', zone: null, turnsLeft: 0, site: null };
     this.planted = false;
     this.roundResult = null;
-    this.lastEvents = []; this.lastKind = null; this.lastVis = [];
+    this.lastEvents = []; this.lastKind = null;
     this.botMemory = {};
     for (const side of SIDES) {
-      const spawns = this.grid.tilesOf(side === 'T' ? 'T' : 'C').filter((t) => this.grid.walkable(t.x, t.y));
-      const cx = spawns.reduce((a, t) => a + t.x, 0) / spawns.length;
-      const cy = spawns.reduce((a, t) => a + t.y, 0) / spawns.length;
-      spawns.sort((a, b) => Math.hypot(a.x - cx, a.y - cy) - Math.hypot(b.x - cx, b.y - cy));
-      const pool = shuffle(spawns.slice(0, 10), this.rng);
-      this.team(side).forEach((p, i) => {
+      for (const p of this.team(side)) {
         if (!p.alive || pistolRound) {
-          p.primary = null; p.armor = 0; p.kit = false; p.pistol = null;
-          p.nades = { he: 0, flash: 0, smoke: 0, molly: 0 };
+          p.primary = null; p.armor = 0; p.kit = false;
+          p.nades = { flash: 0, smoke: 0, he: 0, molly: 0 };
         }
-        if (!p.pistol || (R.WEAPONS[p.pistol].side && R.WEAPONS[p.pistol].side !== side)) p.pistol = side === 'T' ? 'glock' : 'usp';
-        if (p.primary && R.WEAPONS[p.primary].side && R.WEAPONS[p.primary].side !== side) p.primary = null;
-        p.hp = R.HP; p.alive = true; p.bomb = false;
-        p.x = pool[i % pool.length].x; p.y = pool[i % pool.length].y;
-        p.plan = null; p.ready = false; p.bought = []; p.flashed = 0; p.held = false; p.ran = false; p.duel = null;
-      });
+        p.pistol = side === 'T' ? 'glock' : 'usp';
+        if (p.primary && R.WEAPONS[p.primary].side !== side) p.primary = null;
+        Object.assign(p, { hp: R.HP, alive: true, bomb: false, zone: side === 'T' ? 'tspawn' : 'ctspawn', prev: null, plan: null, ready: false, bought: [], fight: null, held: false, flashed: false });
+      }
     }
     const ts = this.team('T');
     if (ts.length) ts[Math.floor(this.rng() * ts.length)].bomb = true;
@@ -110,8 +82,8 @@ export class Match {
     this.half = 1;
     this.lossStreak = [0, 0];
     for (const p of this.players) {
-      p.money = R.ECONOMY.start; p.primary = null; p.pistol = null; p.armor = 0; p.kit = false;
-      p.nades = { he: 0, flash: 0, smoke: 0, molly: 0 };
+      p.money = R.ECONOMY.start; p.primary = null; p.armor = 0; p.kit = false;
+      p.nades = { flash: 0, smoke: 0, he: 0, molly: 0 };
     }
   }
 
@@ -130,8 +102,8 @@ export class Match {
       const prev = p.primary;
       apply = () => { p.primary = item; return () => { p.primary = prev; }; };
     } else if (R.GRENADES[item]) {
-      if (p.nades[item] >= 1) return { ok: false, error: 'Можна мати лише одну таку гранату' };
-      if (this.nadeCount(p) >= R.MAX_GRENADES) return { ok: false, error: 'Максимум 3 гранати' };
+      if (p.nades[item] >= 1) return { ok: false, error: 'Така граната вже є' };
+      if (this.nadeCount(p) >= R.MAX_GRENADES) return { ok: false, error: `Максимум ${R.MAX_GRENADES} гранати` };
       price = R.GRENADES[item].price;
       apply = () => { p.nades[item] += 1; return () => { p.nades[item] -= 1; }; };
     } else if (item === 'vest' || item === 'helmet') {
@@ -160,20 +132,20 @@ export class Match {
   }
 
   endBuy() {
-    for (const p of this.players) p.bought = [];
+    for (const p of this.players) { p.bought = []; p.vestUp = p.armor >= 1; }
     this.startMove();
   }
 
   startMove() {
     this.phase = 'move';
     this.turn += 1;
-    this.duelRound = 0;
-    for (const p of this.players) { p.plan = null; p.ready = false; p.duel = null; }
+    this.fightRound = 0;
+    for (const p of this.players) { p.plan = null; p.ready = false; p.fight = null; p.flashed = false; }
   }
 
-  /* ---------- хід руху ---------- */
-  canPlant(p) { return p.alive && p.bomb && this.sideOf(p) === 'T' && !!this.grid.site(p.x, p.y) && this.bomb.state === 'carried'; }
-  canDefuse(p) { return p.alive && this.sideOf(p) === 'CT' && this.bomb.state === 'planted' && cheb(p, this.bomb) <= 1; }
+  /* ---------- хід ---------- */
+  canPlant(p) { return p.alive && p.bomb && this.sideOf(p) === 'T' && !!ZONE[p.zone].site && this.bomb.state === 'carried'; }
+  canDefuse(p) { return p.alive && this.sideOf(p) === 'CT' && this.bomb.state === 'planted' && p.zone === this.bomb.zone; }
 
   setPlan(id, raw) {
     const p = this.get(id);
@@ -184,396 +156,259 @@ export class Match {
   }
 
   normalizePlan(p, raw) {
-    const plan = { quiet: !!raw.quiet, path: [], grenade: null, action: null };
-    if (raw.action === 'plant' && this.canPlant(p)) plan.action = 'plant';
-    if (raw.action === 'defuse' && this.canDefuse(p)) plan.action = 'defuse';
-    if (plan.action) return plan;
-    const g = raw.grenade;
-    if (g && R.GRENADES[g.type] && p.nades[g.type] > 0 && this.validThrow(p, g)) plan.grenade = { type: g.type, x: g.x, y: g.y };
-    const steps = Math.max(0, (plan.quiet ? R.MOVE_QUIET : R.MOVE_FAST) - (plan.grenade ? R.NADE_MOVE_COST : 0));
-    let cx = p.x, cy = p.y;
-    if (Array.isArray(raw.path)) {
-      for (const s of raw.path.slice(0, steps)) {
-        if (!s || !Number.isInteger(s.x) || !Number.isInteger(s.y)) break;
-        if (!this.grid.neighbors(cx, cy).some((n) => n.x === s.x && n.y === s.y)) break;
-        plan.path.push({ x: s.x, y: s.y });
-        cx = s.x; cy = s.y;
-      }
-    }
+    const plan = { action: 'hold', to: null, nade: null };
+    if (raw.action === 'move' && ZONE[p.zone].adj.includes(raw.to)) { plan.action = 'move'; plan.to = raw.to; }
+    else if (raw.action === 'plant' && this.canPlant(p)) plan.action = 'plant';
+    else if (raw.action === 'defuse' && this.canDefuse(p)) plan.action = 'defuse';
+    const n = raw.nade;
+    if (n && R.GRENADES[n.type] && p.nades[n.type] > 0 && (n.zone === p.zone || ZONE[p.zone].adj.includes(n.zone))) plan.nade = { type: n.type, zone: n.zone };
     return plan;
   }
 
-  validThrow(p, g) {
-    return g && Number.isInteger(g.x) && Number.isInteger(g.y) && !this.grid.opaque(g.x, g.y)
-      && dist(p, g) <= R.THROW_RANGE + 0.01 && this.grid.los(p.x, p.y, g.x, g.y);
-  }
-
-  humansToWait() {
-    if (this.phase === 'move') return this.players.filter((p) => p.alive && !p.isBot && p.connected);
-    if (this.phase === 'duel') return this.players.filter((p) => p.alive && !p.isBot && p.connected && p.duel);
-    return [];
-  }
   allReady() {
-    if (this.phase === 'duel') return this.players.filter((p) => p.duel && p.alive && !p.isBot && p.connected).every((p) => p.duel.ready);
-    return this.humansToWait().every((p) => p.ready);
+    if (this.phase === 'duel') return this.players.filter((p) => p.fight && p.alive && !p.isBot && p.connected).every((p) => p.fight.ready);
+    return this.players.filter((p) => p.alive && !p.isBot && p.connected).every((p) => p.ready);
   }
 
   resolveMove() {
     const ev = [];
     this.events = ev;
-    this.visLog = [];
     const alive = this.players.filter((p) => p.alive);
-    for (const p of this.players) p.flashed = 0;
-    const st = new Map();
-    for (const p of alive) {
-      const plan = p.plan || this.normalizePlan(p, {});
-      st.set(p.id, { plan, path: plan.path.slice(), moved: 0, stopped: false, burned: false });
-    }
-    // гранати летять на початку ходу
-    const throws = alive.filter((p) => st.get(p.id).plan.grenade)
-      .sort((a, b) => NADE_ORDER.indexOf(st.get(a.id).plan.grenade.type) - NADE_ORDER.indexOf(st.get(b.id).plan.grenade.type));
-    for (const p of throws) if (p.alive) this.throwNade(p, st.get(p.id).plan.grenade, 0, null);
-    this.seen = new Set();
-    this.checkContacts(0, st);
+    for (const p of alive) { if (!p.plan) p.plan = this.normalizePlan(p, {}); p.prev = p.zone; p.flashed = false; }
 
-    for (let t = 1; t <= R.MOVE_FAST; t++) {
-      for (const p of alive) {
-        const s = st.get(p.id);
-        if (!p.alive || s.stopped || !s.path.length) continue;
-        const next = s.path.shift();
-        p.x = next.x; p.y = next.y; s.moved += 1;
-        ev.push({ t, type: 'move', id: p.id, x: p.x, y: p.y });
-        if (this.bomb.state === 'dropped' && this.sideOf(p) === 'T' && p.x === this.bomb.x && p.y === this.bomb.y) {
-          this.bomb.state = 'carried'; p.bomb = true;
-          ev.push({ t, type: 'pickup', id: p.id });
-        }
-        if (this.fireAt(p.x, p.y)) s.burned = true;
+    // 1. дим і вогонь з'являються до руху
+    const throws = alive.filter((p) => p.plan.nade).sort((a, b) => NADE_ORDER.indexOf(a.plan.nade.type) - NADE_ORDER.indexOf(b.plan.nade.type));
+    for (const p of throws) {
+      const { type, zone } = p.plan.nade;
+      p.nades[type] -= 1;
+      ev.push({ type: 'nade', by: p.id, squad: p.squad, nade: type, zone, from: p.zone });
+      if (type === 'smoke') this.smokes[zone] = R.SMOKE_TURNS;
+      if (type === 'molly') { if (!this.smoked(zone)) this.fires[zone] = { turns: R.FIRE_TURNS, by: p.id, squad: p.squad }; }
+    }
+
+    // 2. рух (зустрічні вороги зустрічаються в одній зоні)
+    const moves = alive.filter((p) => p.plan.action === 'move');
+    for (const p of moves) p.zone = p.plan.to;
+    for (const a of moves) for (const b of moves) {
+      if (a.squad < b.squad && a.prev === b.zone && b.prev === a.zone && a.zone !== b.zone) {
+        b.zone = a.zone; // розминутися не вийшло — зустрілись
+        ev.push({ type: 'clash', a: a.id, b: b.id, zone: a.zone });
       }
-      this.checkContacts(t, st);
     }
-    const T_END = R.MOVE_FAST + 1;
+    for (const p of alive) {
+      p.held = p.plan.action !== 'move';
+      if (p.zone !== p.prev) ev.push({ type: 'move', id: p.id, squad: p.squad, from: p.prev, to: p.zone });
+    }
+    // підібрати бомбу
+    if (this.bomb.state === 'dropped') {
+      const t = this.inZone(this.bomb.zone).find((p) => this.sideOf(p) === 'T');
+      if (t) { this.bomb.state = 'carried'; t.bomb = true; ev.push({ type: 'pickup', id: t.id, zone: t.zone }); }
+    }
 
-    // вогонь
-    for (const p of alive) {
-      const s = st.get(p.id);
-      if (!p.alive) continue;
-      const n = (s.burned ? 1 : 0) + (this.fireAt(p.x, p.y) ? 1 : 0);
-      if (n) { ev.push({ t: T_END, type: 'burn', id: p.id, dmg: R.FIRE_DAMAGE * n }); this.hurt(p, R.FIRE_DAMAGE * n, this.fireOwner(p), 'molly', T_END); }
+    // 3. флешки, осколкові, вогонь — після руху
+    for (const p of throws) {
+      const { type, zone } = p.plan.nade;
+      const victims = this.inZone(zone).filter((q) => q.squad !== p.squad);
+      if (type === 'flash') { for (const q of victims) q.flashed = true; ev.push({ type: 'flashed', by: p.id, zone, ids: victims.map((q) => q.id) }); }
+      if (type === 'he') for (const q of victims) this.damage(q, 1, p, 'he', ev);
     }
-    // шум бігу
-    for (const p of alive) {
-      const s = st.get(p.id);
-      if (p.alive && s.moved > R.MOVE_QUIET && !s.plan.quiet) ev.push({ t: T_END, type: 'noise', id: p.id, x: p.x, y: p.y, squad: p.squad });
+    for (const [zone, f] of Object.entries(this.fires)) {
+      if (f.turns <= 0) continue;
+      for (const q of this.inZone(zone)) if (q.squad !== f.squad) { ev.push({ type: 'burn', id: q.id, zone }); this.damage(q, 1, this.get(f.by), 'molly', ev); }
     }
-    // хто тримав кут, а хто вибіг
-    for (const p of alive) {
-      const s = st.get(p.id);
-      p.held = p.alive && s.moved === 0 && !s.plan.action;
-      p.ran = p.alive && s.moved >= 4;
-    }
-    // закладка і розмінування
+
+    // 4. кроки чути в сусідніх зонах
+    for (const p of alive) if (p.alive && p.zone !== p.prev) ev.push({ type: 'noise', squad: p.squad, zone: p.zone });
+
+    // 5. бомба
     let justPlanted = false;
     for (const p of alive) {
-      const s = st.get(p.id);
-      if (p.alive && s.plan.action === 'plant' && p.bomb && this.grid.site(p.x, p.y)) {
+      if (p.alive && p.plan.action === 'plant' && this.canPlant(p) && (!this.enemiesIn(p).length || this.smoked(p.zone))) {
         p.bomb = false;
-        Object.assign(this.bomb, { state: 'planted', x: p.x, y: p.y, clock: R.BOMB_TIME, site: this.grid.site(p.x, p.y), planter: p.id, progress: 0, defuser: null });
+        Object.assign(this.bomb, { state: 'planted', zone: p.zone, site: ZONE[p.zone].site, turnsLeft: R.BOMB_TURNS, planter: p.id });
         this.planted = true; justPlanted = true;
-        ev.push({ t: T_END, type: 'planted', id: p.id, x: p.x, y: p.y, site: this.bomb.site });
+        ev.push({ type: 'planted', id: p.id, zone: p.zone, site: this.bomb.site });
+      } else if (p.alive && p.plan.action === 'plant') ev.push({ type: 'planfail', id: p.id, why: 'У зоні ворог — закласти не вдалося' });
+    }
+    if (this.bomb.state === 'planted' && !justPlanted) {
+      for (const p of alive) {
+        if (!p.alive || !this.canDefuse(p)) continue;
+        const tries = p.plan.action === 'defuse' || (p.kit && p.prev !== p.zone);
+        if (!tries) continue;
+        if (this.enemiesIn(p).length && !this.smoked(p.zone)) { ev.push({ type: 'planfail', id: p.id, why: 'Ворог поруч — розмінувати не вдалося' }); continue; }
+        this.bomb.state = 'defused';
+        ev.push({ type: 'defused', id: p.id, zone: p.zone, kit: p.kit });
+        break;
+      }
+      if (this.bomb.state === 'planted') {
+        this.bomb.turnsLeft -= 1;
+        if (this.bomb.turnsLeft <= 0) {
+          this.bomb.state = 'exploded';
+          ev.push({ type: 'exploded', zone: this.bomb.zone });
+          for (const q of this.inZone(this.bomb.zone)) this.damage(q, 99, null, 'bomb', ev, true);
+        }
       }
     }
-    if (!justPlanted) this.defuseStep(alive.filter((p) => p.alive && st.get(p.id).plan.action === 'defuse'), R.MOVE_TIME, T_END);
-    this.passTime(R.MOVE_TIME, justPlanted, T_END);
-
+    // 6. дим і вогонь гаснуть
+    for (const z of Object.keys(this.smokes)) if (--this.smokes[z] <= 0) delete this.smokes[z];
+    for (const z of Object.keys(this.fires)) if (--this.fires[z].turns <= 0) delete this.fires[z];
     for (const p of this.players) { p.plan = null; p.ready = false; }
     return this.afterResolve('move');
   }
 
-  // зупинка при контакті і запис видимості для туману війни
-  checkContacts(t, st, silent) {
-    const alive = this.players.filter((p) => p.alive);
-    const squadVis = [new Set(), new Set()];
-    for (const p of alive) {
-      const v = this.visibleEnemies(p);
-      for (const q of v) {
-        squadVis[p.squad].add(q.id);
-        const key = [p.id, q.id].sort().join('|');
-        if (!this.seen.has(key)) {
-          this.seen.add(key);
-          if (!silent) this.events.push({ t, type: 'contact', a: p.id, b: q.id, ax: p.x, ay: p.y, bx: q.x, by: q.y });
-        }
-      }
-      const s = st && st.get(p.id);
-      if (s && v.length && s.path.length && !s.stopped) { s.stopped = true; s.path = []; this.events.push({ t, type: 'halt', id: p.id }); }
-    }
-    this.visLog[t] = squadVis.map((s) => [...s]);
+  damage(p, n, attacker, cause, ev, pierce = false) {
+    if (!p.alive || n <= 0) return 0;
+    if (!pierce && n === 1 && p.vestUp) { p.vestUp = false; ev.push({ type: 'armor', id: p.id }); return 0; }
+    p.hp = Math.max(0, p.hp - n);
+    if (p.hp <= 0) this.kill(p, attacker, cause, ev);
+    return n;
   }
 
-  fireOwner(p) {
-    const f = this.fires.find((f) => f.tiles.includes(p.x + ',' + p.y));
-    return f ? this.get(f.by) : null;
-  }
-
-  defuseStep(defusers, seconds, t) {
-    if (this.bomb.state !== 'planted') return;
-    const d = defusers.find((p) => p.id === this.bomb.defuser && this.canDefuse(p)) || defusers.find((p) => this.canDefuse(p));
-    if (!d) { this.bomb.defuser = null; this.bomb.progress = 0; return; }
-    this.bomb.progress = (this.bomb.defuser === d.id ? this.bomb.progress : 0) + seconds;
-    this.bomb.defuser = d.id;
-    const need = d.kit ? R.KIT_DEFUSE_TIME : R.DEFUSE_TIME;
-    this.events.push({ t, type: 'defusing', id: d.id, progress: Math.min(need, this.bomb.progress), need });
-    if (this.bomb.progress >= need) { this.bomb.state = 'defused'; this.events.push({ t, type: 'defused', id: d.id }); }
-  }
-
-  passTime(seconds, justPlanted, t) {
-    if (this.bomb.state === 'planted' && !justPlanted) {
-      this.bomb.clock -= seconds;
-      if (this.bomb.clock <= 0) {
-        this.bomb.state = 'exploded';
-        this.events.push({ t, type: 'exploded', x: this.bomb.x, y: this.bomb.y });
-        for (const p of this.players) if (p.alive && dist(p, this.bomb) <= 5) this.hurt(p, 500, null, 'bomb', t);
-      }
-    }
-    if (!this.planted) this.clock = Math.max(0, this.clock - seconds);
-    for (const a of [this.smokes, this.fires]) for (const s of a) s.time -= seconds;
-    this.smokes = this.smokes.filter((s) => s.time > 0);
-    this.fires = this.fires.filter((s) => s.time > 0);
-    this.rebuildAreas();
-  }
-
-  afterResolve(kind) {
-    this.lastEvents = this.events;
-    this.lastVis = this.visLog;
-    this.lastKind = kind;
-    const end = this.checkRoundEnd();
-    if (end) { this.finishRound(end); return { events: this.events, roundEnd: end }; }
-    if (this.anyContact()) this.startDuel();
-    else this.startMove();
-    return { events: this.events, roundEnd: null };
-  }
-
-  anyContact() { return this.players.some((p) => p.alive && this.visibleEnemies(p).length); }
-
-  /* ---------- дуель ---------- */
-  startDuel() {
-    this.phase = 'duel';
-    this.duelRound += 1;
-    for (const p of this.players) {
-      p.ready = false; p.plan = null;
-      p.duel = p.alive && this.visibleEnemies(p).length ? { action: null, target: null, tile: null, path: null, rolls: null, ready: false } : null;
-    }
-  }
-
-  duelOptions(p) {
-    const enemies = this.visibleEnemies(p);
-    return { enemies, first: this.duelRound === 1 };
-  }
-
-  // вибір дії в дуелі
-  duelAct(id, raw) {
-    const p = this.get(id);
-    if (!p || !p.alive || this.phase !== 'duel' || !p.duel) return { ok: false, error: 'Ви не в дуелі' };
-    if (p.duel.rolls) return { ok: false, error: 'Кубики вже кинуто' };
-    const enemies = this.visibleEnemies(p);
-    const a = String(raw.action || '');
-    const d = p.duel;
-    if (a === 'shoot') {
-      const tgt = enemies.find((q) => q.id === raw.target) || nearest(p, enemies);
-      if (!tgt) return { ok: false, error: 'Немає цілі' };
-      Object.assign(d, { action: 'shoot', target: tgt.id, tile: null, path: null });
-    } else if (a === 'hide') {
-      const path = this.hidePath(p, enemies, raw.x, raw.y);
-      if (!path) return { ok: false, error: 'Туди не відійти' };
-      Object.assign(d, { action: 'hide', target: null, tile: path[path.length - 1] || { x: p.x, y: p.y }, path });
-    } else if (a.startsWith('nade:')) {
-      const type = a.slice(5);
-      if (!R.GRENADES[type] || p.nades[type] <= 0) return { ok: false, error: 'Немає такої гранати' };
-      const tgt = Number.isInteger(raw.x) ? { x: raw.x, y: raw.y } : nearest(p, enemies);
-      if (!tgt || !this.validThrow(p, tgt)) return { ok: false, error: 'Сюди не докинути' };
-      Object.assign(d, { action: 'nade', nade: type, target: null, tile: { x: tgt.x, y: tgt.y }, path: null });
-    } else if (a === 'defuse') {
-      if (!this.canDefuse(p)) return { ok: false, error: 'Бомба далеко' };
-      Object.assign(d, { action: 'defuse', target: null, tile: null, path: null });
-    } else return { ok: false, error: 'Невідома дія' };
-    return { ok: true };
-  }
-
-  // гравець сам кидає кубики
-  duelRoll(id) {
-    const p = this.get(id);
-    if (!p || !p.alive || this.phase !== 'duel' || !p.duel) return { ok: false };
-    const d = p.duel;
-    if (!d.action) return { ok: false, error: 'Спершу оберіть дію' };
-    if (!d.rolls) {
-      const n = d.action === 'shoot' ? this.weapon(p).bullets : d.action === 'defuse' ? 0 : 1;
-      d.rolls = Array.from({ length: n }, () => d20(this.rng));
-    }
-    d.ready = true;
-    return { ok: true, rolls: d.rolls };
-  }
-
-  autoDuel(p) {
-    if (!p.duel || p.duel.ready) return;
-    if (!p.duel.action) this.duelAct(p.id, { action: 'shoot' });
-    if (!p.duel.action) this.duelAct(p.id, { action: 'hide' });
-    this.duelRoll(p.id);
-  }
-
-  // шлях відходу: на 1–2 клітинки, бажано туди, де ворог не бачить
-  hidePath(p, enemies, tx, ty) {
-    const d = this.grid.distanceField(p.x, p.y);
-    const cand = [];
-    for (let y = p.y - R.HIDE_STEPS; y <= p.y + R.HIDE_STEPS; y++) for (let x = p.x - R.HIDE_STEPS; x <= p.x + R.HIDE_STEPS; x++) {
-      const v = d[x + y * this.grid.w];
-      if (x < 0 || y < 0 || x >= this.grid.w || y >= this.grid.h || v < 1 || v > R.HIDE_STEPS) continue;
-      cand.push({ x, y });
-    }
-    if (Number.isInteger(tx)) {
-      const c = cand.find((c) => c.x === tx && c.y === ty);
-      return c ? this.grid.path(p.x, p.y, c.x, c.y) : null;
-    }
-    const best = this.hideOptions(p, enemies, cand)[0];
-    return best ? this.grid.path(p.x, p.y, best.x, best.y) : [];
-  }
-
-  hideOptions(p, enemies, cand) {
-    return cand.map((c) => ({ ...c, safe: enemies.filter((e) => !this.grid.los(e.x, e.y, c.x, c.y, (x, y) => this.smokeAt(x, y))).length, far: Math.min(...enemies.map((e) => dist(e, c))) }))
-      .sort((a, b) => b.safe - a.safe || b.far - a.far);
-  }
-
-  resolveDuel() {
-    const ev = [];
-    this.events = ev;
-    this.visLog = [];
-    this.seen = new Set();
-    const fighters = this.players.filter((p) => p.alive && p.duel);
-    for (const p of fighters) this.autoDuel(p);
-    const first = this.duelRound === 1;
-    this.checkContacts(0, null, true);
-
-    // 0: гранати (кидок на точність)
-    const throwers = fighters.filter((p) => p.duel.action === 'nade')
-      .sort((a, b) => NADE_ORDER.indexOf(a.duel.nade) - NADE_ORDER.indexOf(b.duel.nade));
-    for (const p of throwers) {
-      if (!p.alive) continue;
-      const roll = p.duel.rolls[0];
-      let tile = p.duel.tile;
-      if (roll < R.NADE_ROLL) {
-        const opts = this.grid.neighbors(tile.x, tile.y).filter((n) => this.grid.los(p.x, p.y, n.x, n.y));
-        if (opts.length) tile = opts[Math.floor(this.rng() * opts.length)];
-      }
-      this.throwNade(p, { type: p.duel.nade, x: tile.x, y: tile.y }, 0, { roll, need: R.NADE_ROLL, exact: roll >= R.NADE_ROLL });
-    }
-
-    // 1: постріли — одночасно, тож можливі розміни
-    const hits = [];
-    for (const p of fighters) {
-      if (!p.alive || p.duel.action !== 'shoot') continue;
-      const tgt = this.get(p.duel.target);
-      if (!tgt || !tgt.alive || !this.los(p, tgt)) { ev.push({ t: 1, type: 'noshot', id: p.id, target: p.duel.target, why: tgt && tgt.alive ? 'Ціль зникла в димі' : 'Ціль уже впала' }); continue; }
-      const hideRoll = tgt.duel && tgt.duel.action === 'hide' ? tgt.duel.rolls[0] : null;
-      const setup = R.shotSetup({
-        weapon: this.weaponId(p), dist: dist(p, tgt), cover: this.grid.cover(p.x, p.y, tgt.x, tgt.y),
-        held: first && p.held, ran: first && p.ran, flashed: p.flashed > 0,
-        hiding: hideRoll === null ? 0 : (hideRoll >= R.HIDE_ROLL ? R.HIDE_GOOD : R.HIDE_BAD),
-      });
-      const bullets = p.duel.rolls.map((roll, k) => {
-        const b = R.bulletResult(roll, setup.bonus, setup.need, k);
-        b.dmg = b.hit ? R.bulletDamage(this.weaponId(p), b.head, tgt.armor) : 0;
-        b.spray = -R.SPRAY * k;
-        return b;
-      });
-      const total = bullets.reduce((a, b) => a + b.dmg, 0);
-      ev.push({ t: 1, type: 'burst', from: p.id, to: tgt.id, weapon: this.weaponId(p), mods: setup.mods, bonus: setup.bonus, need: setup.need, bullets, total, fx: p.x, fy: p.y, tx: tgt.x, ty: tgt.y, hideRoll });
-      if (total) hits.push({ p, tgt, total });
-    }
-    for (const h of hits) this.hurt(h.tgt, h.total, h.p, this.weaponId(h.p), 1);
-
-    // 2: відхід
-    for (const p of fighters) {
-      if (!p.alive || p.duel.action !== 'hide') continue;
-      ev.push({ t: 2, type: 'hide', id: p.id, roll: p.duel.rolls[0], need: R.HIDE_ROLL, good: p.duel.rolls[0] >= R.HIDE_ROLL });
-      p.duel.path.forEach((s, i) => { p.x = s.x; p.y = s.y; ev.push({ t: 2 + i, type: 'move', id: p.id, x: s.x, y: s.y }); });
-    }
-    this.checkContacts(4, null, true);
-    const T_END = 5;
-    // розмінування під вогнем
-    this.defuseStep(fighters.filter((p) => p.alive && p.duel.action === 'defuse'), R.DUEL_TIME, T_END);
-    // вогонь
-    for (const p of this.players) if (p.alive && this.fireAt(p.x, p.y)) {
-      ev.push({ t: T_END, type: 'burn', id: p.id, dmg: R.FIRE_DAMAGE });
-      this.hurt(p, R.FIRE_DAMAGE, this.fireOwner(p), 'molly', T_END);
-    }
-    this.passTime(R.DUEL_TIME, false, T_END);
-    for (const p of this.players) { p.flashed = 0; p.held = false; p.ran = false; }
-    return this.afterResolve('duel');
-  }
-
-  /* ---------- гранати ---------- */
-  throwNade(p, g, t, rollInfo) {
-    p.nades[g.type] -= 1;
-    const e = { t, type: 'nade', by: p.id, squad: p.squad, nade: g.type, x: g.x, y: g.y, fx: p.x, fy: p.y, ...(rollInfo ? { roll: rollInfo.roll, need: rollInfo.need, exact: rollInfo.exact } : {}) };
-    this.events.push(e);
-    if (g.type === 'smoke') {
-      this.smokes.push({ x: g.x, y: g.y, time: R.SMOKE_TIME, tiles: this.areaTiles(g.x, g.y, R.GRENADES.smoke.radius, true) });
-      // дим гасить вогонь
-      for (const f of this.fires) f.tiles = f.tiles.filter((k) => !this.smokes[this.smokes.length - 1].tiles.includes(k));
-      this.rebuildAreas();
-    } else if (g.type === 'molly') {
-      const tiles = this.areaTiles(g.x, g.y, 1, false).filter((k) => !this.smokeTiles.has(k));
-      this.fires.push({ x: g.x, y: g.y, time: R.FIRE_TIME, tiles, by: p.id });
-      this.rebuildAreas();
-    } else if (g.type === 'flash') {
-      e.blinded = [];
-      for (const q of this.players) {
-        if (!q.alive || q.id === p.id) continue;
-        if (dist(q, g) <= R.GRENADES.flash.radius + 0.5 && this.grid.los(g.x, g.y, q.x, q.y, (x, y) => this.smokeAt(x, y))) {
-          q.flashed = 1; e.blinded.push(q.id); // діє в найближчій дуелі
-        }
-      }
-    } else if (g.type === 'he') {
-      e.hits = [];
-      for (const q of this.players) {
-        if (!q.alive) continue;
-        const d = dist(q, g);
-        if (d > R.GRENADES.he.radius + 0.5 || !this.grid.los(g.x, g.y, q.x, q.y)) continue;
-        const dmg = Math.round((57 - 18 * d) * (q.armor ? 0.55 : 1));
-        if (dmg <= 0) continue;
-        e.hits.push({ id: q.id, dmg });
-        this.hurt(q, dmg, p, 'he', t);
-      }
-    }
-  }
-
-  hurt(p, dmg, attacker, cause, t) {
-    if (!p.alive) return;
-    p.hp = Math.max(0, p.hp - dmg);
-    if (p.hp > 0) return;
-    p.alive = false; p.deaths += 1; p.duel = null;
-    const ev = { t, type: 'kill', id: p.id, by: attacker ? attacker.id : null, cause, x: p.x, y: p.y };
+  kill(p, attacker, cause, ev) {
+    p.alive = false; p.deaths += 1; p.fight = null;
+    const e = { type: 'kill', id: p.id, by: attacker ? attacker.id : null, cause, zone: p.zone };
     if (attacker && attacker.squad !== p.squad) {
       attacker.kills += 1;
       const reward = R.WEAPONS[cause] ? R.WEAPONS[cause].kill : 300;
       attacker.money = Math.min(R.ECONOMY.max, attacker.money + reward);
-      ev.reward = reward;
+      e.reward = reward;
     }
-    this.events.push(ev);
+    ev.push(e);
     if (p.bomb) {
       p.bomb = false;
-      Object.assign(this.bomb, { state: 'dropped', x: p.x, y: p.y });
-      this.events.push({ t, type: 'drop', id: p.id, x: p.x, y: p.y });
+      Object.assign(this.bomb, { state: 'dropped', zone: p.zone });
+      ev.push({ type: 'drop', id: p.id, zone: p.zone });
     }
-    p.primary = null; p.armor = 0; p.kit = false; p.nades = { he: 0, flash: 0, smoke: 0, molly: 0 };
+    p.primary = null; p.armor = 0; p.kit = false; p.vestUp = false; p.nades = { flash: 0, smoke: 0, he: 0, molly: 0 };
   }
 
-  checkRoundEnd() {
+  afterResolve(kind) {
+    this.lastEvents = this.events;
+    this.lastKind = kind;
+    // бомбу підбирає T, що лишився в зоні після бою
+    if (this.bomb.state === 'dropped') {
+      const t = this.inZone(this.bomb.zone).find((p) => this.sideOf(p) === 'T');
+      if (t && !this.contested(t.zone)) { this.bomb.state = 'carried'; t.bomb = true; this.events.push({ type: 'pickup', id: t.id, zone: t.zone }); }
+    }
+    const end = this.checkRoundEnd(kind);
+    if (end) { this.finishRound(end); return { events: this.events, roundEnd: end }; }
+    if (ZONES.some((z) => this.contested(z.id))) this.startFight();
+    else if (kind === 'duel' && this.turn >= R.TURNS && !this.planted) { this.finishRound({ winner: 'CT', reason: 'time' }); return { events: this.events, roundEnd: this.roundResult }; }
+    else this.startMove();
+    return { events: this.events, roundEnd: null };
+  }
+
+  /* ---------- перестрілка ---------- */
+  startFight() {
+    this.phase = 'duel';
+    this.fightRound += 1;
+    for (const p of this.players) {
+      p.ready = false;
+      p.fight = p.alive && this.contested(p.zone) ? { zone: p.zone, action: null, target: null, dice: null, ready: false } : null;
+    }
+  }
+
+  fightInfo(p) {
+    const enemies = this.enemiesIn(p);
+    return {
+      zone: p.zone,
+      enemies,
+      mine: R.shotBonus({ weapon: this.weaponId(p), held: p.held, flashed: p.flashed }),
+    };
+  }
+
+  duelAct(id, raw) {
+    const p = this.get(id);
+    if (!p || !p.alive || this.phase !== 'duel' || !p.fight) return { ok: false, error: 'Ви не в перестрілці' };
+    if (p.fight.dice) return { ok: false, error: 'Кубики вже кинуто' };
+    const enemies = this.enemiesIn(p);
+    if (raw.action === 'retreat') Object.assign(p.fight, { action: 'retreat', target: null });
+    else {
+      const t = enemies.find((q) => q.id === raw.target) || enemies.slice().sort((a, b) => a.hp - b.hp)[0];
+      if (!t) return { ok: false, error: 'Немає цілі' };
+      Object.assign(p.fight, { action: 'shoot', target: t.id });
+    }
+    return { ok: true };
+  }
+
+  duelRoll(id) {
+    const p = this.get(id);
+    if (!p || !p.alive || this.phase !== 'duel' || !p.fight) return { ok: false };
+    if (!p.fight.action) this.duelAct(id, { action: 'shoot' });
+    if (!p.fight.dice) {
+      const n = p.fight.action === 'retreat' ? 1 : this.weapon(p).dice;
+      p.fight.dice = Array.from({ length: n }, () => d6(this.rng));
+    }
+    p.fight.ready = true;
+    return { ok: true, dice: p.fight.dice };
+  }
+
+  autoDuel(p) {
+    if (!p.fight || p.fight.ready) return;
+    this.duelRoll(p.id);
+  }
+
+  retreatZone(p) {
+    const opts = ZONE[p.zone].adj.filter((z) => !this.inZone(z).some((q) => q.squad !== p.squad));
+    if (p.prev && p.prev !== p.zone && opts.includes(p.prev)) return p.prev;
+    return opts.length ? opts[Math.floor(this.rng() * opts.length)] : null;
+  }
+
+  resolveFight() {
+    const ev = [];
+    this.events = ev;
+    const fighters = this.players.filter((p) => p.alive && p.fight);
+    for (const p of fighters) this.autoDuel(p);
+    // підсумки кидків
+    const sum = {};
+    for (const p of fighters) {
+      const f = p.fight;
+      if (f.action === 'shoot') {
+        const b = R.shotBonus({ weapon: this.weaponId(p), held: p.held, flashed: p.flashed });
+        sum[p.id] = f.dice.reduce((a, d) => a + d, 0) + b.bonus;
+        ev.push({ type: 'roll', id: p.id, zone: f.zone, action: 'shoot', target: f.target, dice: f.dice, mods: b.mods, bonus: b.bonus, total: sum[p.id], weapon: this.weaponId(p) });
+      } else {
+        ev.push({ type: 'roll', id: p.id, zone: f.zone, action: 'retreat', dice: f.dice, total: f.dice[0], safe: f.dice[0] >= R.RETREAT_SAFE });
+      }
+    }
+    // влучання — одночасно
+    const hits = [];
+    for (const p of fighters) {
+      const f = p.fight;
+      if (f.action !== 'shoot') continue;
+      const t = this.get(f.target);
+      if (!t || !t.fight || t.zone !== p.zone) continue;
+      if (t.fight.action === 'retreat') { ev.push({ type: 'shot', from: p.id, to: t.id, vs: 'retreat', hit: false }); continue; }
+      const hit = sum[p.id] >= sum[t.id];
+      const head = hit && R.isHeadshot(this.weaponId(p), f.dice, t.armor);
+      ev.push({ type: 'shot', from: p.id, to: t.id, mine: sum[p.id], theirs: sum[t.id], hit, head, tie: sum[p.id] === sum[t.id] });
+      if (hit) hits.push({ p, t, head });
+    }
+    for (const h of hits) {
+      const before = h.t.hp;
+      const dealt = this.damage(h.t, h.head ? 99 : 1, h.p, this.weaponId(h.p), ev, h.head);
+      ev.push({ type: 'hit', from: h.p.id, to: h.t.id, head: h.head, armor: !dealt && !h.head, hpBefore: before, hp: h.t.hp });
+    }
+    // відступ
+    for (const p of fighters) {
+      if (!p.alive || p.fight.action !== 'retreat') continue;
+      const safe = p.fight.dice[0] >= R.RETREAT_SAFE;
+      const to = this.retreatZone(p);
+      if (!safe) { const dealt = this.damage(p, 1, null, 'retreat', ev); ev.push({ type: 'hit', from: null, to: p.id, retreat: true, armor: !dealt, hp: p.hp }); }
+      if (p.alive && to) { ev.push({ type: 'retreat', id: p.id, from: p.zone, to, safe }); p.prev = p.zone; p.zone = to; p.held = false; }
+      else if (p.alive) ev.push({ type: 'retreat', id: p.id, from: p.zone, to: null, safe });
+    }
+    return this.afterResolve('duel');
+  }
+
+  checkRoundEnd(kind) {
     const tAlive = this.aliveOf('T').length, ctAlive = this.aliveOf('CT').length;
     if (this.bomb.state === 'exploded') return { winner: 'T', reason: 'bomb' };
     if (this.bomb.state === 'defused') return { winner: 'CT', reason: 'defuse' };
     if (!ctAlive) return { winner: 'T', reason: 'elim' };
     if (this.bomb.state !== 'planted') {
       if (!tAlive) return { winner: 'CT', reason: 'elim' };
-      if (this.clock <= 0) return { winner: 'CT', reason: 'time' };
+      if (kind === 'move' && this.turn >= R.TURNS && !ZONES.some((z) => this.contested(z.id))) return { winner: 'CT', reason: 'time' };
     }
     return null;
   }
@@ -587,8 +422,7 @@ export class Match {
     this.lossStreak[loseSquad] += 1;
     this.lossStreak[winSquad] = Math.max(0, this.lossStreak[winSquad] - 1);
     const loseMoney = R.lossBonus(this.lossStreak[loseSquad]) + (end.winner === 'CT' && this.planted ? E.plantBonus : 0);
-    for (const p of this.players) p.money = Math.min(E.max, p.money + (p.squad === winSquad ? winMoney : loseMoney));
-    for (const p of this.players) p.duel = null;
+    for (const p of this.players) { p.money = Math.min(E.max, p.money + (p.squad === winSquad ? winMoney : loseMoney)); p.fight = null; }
     this.roundResult = { ...end, winSquad, winMoney, loseMoney, round: this.round };
     this.history.push({ round: this.round, winSquad, winner: end.winner, reason: end.reason });
     const over = this.score[0] >= R.ROUNDS_TO_WIN || this.score[1] >= R.ROUNDS_TO_WIN || this.round >= R.ROUNDS_TOTAL;
@@ -597,106 +431,74 @@ export class Match {
   }
 
   /* ---------- вигляд для конкретного гравця (туман війни) ---------- */
-  squadSees(squad) {
-    const mates = this.players.filter((p) => p.squad === squad && p.alive);
-    const seen = new Set();
-    for (const q of this.players) {
-      if (!q.alive || q.squad === squad) continue;
-      if (mates.some((m) => this.los(m, q))) seen.add(q.id);
-    }
-    return seen;
-  }
+  squadZones(squad) { return new Set(this.players.filter((p) => p.alive && p.squad === squad).map((p) => p.zone)); }
 
   viewFor(viewerId) {
     const me = this.get(viewerId);
     const spectator = !me;
     const squad = me ? me.squad : 0;
-    const seen = spectator ? new Set(this.players.map((p) => p.id)) : this.squadSees(squad);
+    const myZones = this.squadZones(squad);
     const over = this.phase === 'roundOver' || this.phase === 'over';
+    const fightZones = new Set(this.players.filter((p) => p.fight).map((p) => p.zone));
     const players = this.players.map((p) => {
       const mine = spectator || p.squad === squad;
-      const base = { id: p.id, name: p.name, isBot: p.isBot, squad: p.squad, side: this.sideOf(p), alive: p.alive, kills: p.kills, deaths: p.deaths, connected: p.connected, inDuel: !!p.duel && (mine || seen.has(p.id)) };
-      if (mine || over) Object.assign(base, { hp: p.hp, money: mine ? p.money : undefined, x: p.x, y: p.y, pistol: p.pistol, primary: p.primary, armor: p.armor, kit: p.kit, nades: mine ? { ...p.nades } : undefined, bomb: p.bomb, ready: this.phase === 'duel' ? !!(p.duel && p.duel.ready) : p.ready, visible: true });
-      else if (seen.has(p.id)) Object.assign(base, { x: p.x, y: p.y, pistol: p.pistol, primary: p.primary, armor: p.armor, bomb: p.bomb, visible: true, hp: p.hp });
-      else base.visible = false;
-      if (!p.alive) Object.assign(base, { visible: true, x: p.x, y: p.y });
+      const seen = mine || over || !p.alive || myZones.has(p.zone);
+      const base = { id: p.id, name: p.name, isBot: p.isBot, squad: p.squad, side: this.sideOf(p), alive: p.alive, kills: p.kills, deaths: p.deaths, connected: p.connected, visible: seen };
+      if (seen) Object.assign(base, { zone: p.zone, hp: p.hp, armor: p.armor, vestUp: p.vestUp, weapon: this.weaponId(p), bomb: p.bomb, inFight: !!p.fight && fightZones.has(p.zone) });
+      if (mine) Object.assign(base, { money: p.money, nades: { ...p.nades }, kit: p.kit, ready: this.phase === 'duel' ? !!(p.fight && p.fight.ready) : p.ready, primary: p.primary, pistol: p.pistol, held: p.held, flashed: p.flashed });
       return base;
     });
-    let bomb = null;
-    const mySide = me ? this.sideOf(me) : 'T';
-    if (this.bomb) {
-      const b = this.bomb;
-      if (b.state === 'planted' || b.state === 'defused' || b.state === 'exploded') bomb = { state: b.state, x: b.x, y: b.y, clock: b.clock, site: b.site, progress: b.progress };
-      else if (b.state === 'dropped') {
-        const visible = spectator || mySide === 'T' || this.players.some((p) => p.alive && p.squad === squad && this.grid.los(p.x, p.y, b.x, b.y, (x, y) => this.smokeAt(x, y)));
-        bomb = visible ? { state: 'dropped', x: b.x, y: b.y } : { state: 'unknown' };
-      } else bomb = { state: 'carried' };
-    }
-    let duel = null;
-    if (me && this.phase === 'duel' && me.duel) {
-      duel = {
-        enemies: this.visibleEnemies(me).map((q) => ({ id: q.id, d: Math.round(dist(me, q) * 10) / 10, cover: this.grid.cover(me.x, me.y, q.x, q.y) })),
-        first: this.duelRound === 1, held: this.duelRound === 1 && me.held, ran: this.duelRound === 1 && me.ran, flashed: me.flashed > 0,
-        action: me.duel.action, target: me.duel.target, tile: me.duel.tile, nade: me.duel.nade, rolls: me.duel.rolls, ready: me.duel.ready,
-        canDefuse: this.canDefuse(me),
+    let bomb = { state: this.bomb.state };
+    const b = this.bomb;
+    if (['planted', 'defused', 'exploded'].includes(b.state)) bomb = { state: b.state, zone: b.zone, site: b.site, turnsLeft: b.turnsLeft };
+    else if (b.state === 'dropped') bomb = (spectator || (me && this.sideOf(me) === 'T') || myZones.has(b.zone)) ? { state: 'dropped', zone: b.zone } : { state: 'unknown' };
+    let fight = null;
+    if (me && this.phase === 'duel' && me.fight) {
+      const info = this.fightInfo(me);
+      fight = {
+        zone: me.zone, round: this.fightRound, action: me.fight.action, target: me.fight.target, dice: me.fight.dice, ready: me.fight.ready,
+        mods: info.mine.mods, bonus: info.mine.bonus, myDice: info.mine.dice,
+        enemies: info.enemies.map((q) => ({ id: q.id, hp: q.hp, armor: q.armor, vestUp: q.vestUp, weapon: this.weaponId(q), ...R.shotBonus({ weapon: this.weaponId(q), held: q.held, flashed: q.flashed }) })),
+        allies: this.inZone(me.zone).filter((q) => q.squad === me.squad && q.id !== me.id).map((q) => q.id),
+        canRetreat: !!this.retreatZone(me),
       };
     }
     return {
-      phase: this.phase, round: this.round, half: this.half, turn: this.turn, duelRound: this.duelRound,
+      phase: this.phase, round: this.round, half: this.half, turn: this.turn, fightRound: this.fightRound,
       clock: this.clock, score: this.score, players, bomb, me: viewerId,
-      smokes: (this.smokes || []).map((s) => ({ x: s.x, y: s.y, time: s.time, tiles: s.tiles })),
-      fires: (this.fires || []).map((s) => ({ x: s.x, y: s.y, time: s.time, tiles: s.tiles })),
-      events: this.filterEvents(squad, spectator), eventsKind: this.lastKind,
+      smokes: { ...this.smokes }, fires: Object.fromEntries(Object.entries(this.fires).map(([z, f]) => [z, f.turns])),
+      events: this.filterEvents(squad, spectator, myZones), eventsKind: this.lastKind,
       roundResult: this.roundResult, matchResult: this.matchResult || null,
-      history: this.history, lossStreak: this.lossStreak,
-      canPlant: me ? this.canPlant(me) && this.phase === 'move' : false,
-      canDefuse: me ? this.canDefuse(me) && this.phase === 'move' : false,
-      duel,
+      history: this.history,
+      canPlant: me && this.phase === 'move' ? this.canPlant(me) : false,
+      canDefuse: me && this.phase === 'move' ? this.canDefuse(me) : false,
+      fight,
+      fightZones: [...fightZones],
     };
   }
 
-  filterEvents(squad, spectator) {
+  filterEvents(squad, spectator, myZones) {
     const ev = this.lastEvents || [];
     if (spectator) return ev;
-    const vis = this.lastVis || [];
     const isMate = (id) => { const p = this.get(id); return p && p.squad === squad; };
-    const seenAt = (id, t) => isMate(id) || !!(vis[t] && vis[t][squad] && vis[t][squad].includes(id));
+    // зони, де була моя команда до чи після ходу
+    const known = new Set(myZones);
+    for (const e of ev) if (e.type === 'move' && e.squad === squad) { known.add(e.from); known.add(e.to); }
+    const near = new Set();
+    for (const z of known) { near.add(z); for (const a of ZONE[z].adj) near.add(a); }
     const out = [];
     for (const e of ev) {
       switch (e.type) {
-        case 'move': if (this.lastKind === 'duel' ? (isMate(e.id) || this.sawInDuel(e.id, squad)) : (seenAt(e.id, e.t) || seenAt(e.id, e.t - 1))) out.push(e); break;
-        case 'burst': case 'noshot': if (isMate(e.from || e.id) || isMate(e.to || e.target) || this.sawInDuel(e.from || e.id, squad)) out.push(e); break;
-        case 'contact': if (isMate(e.a) || isMate(e.b)) out.push(e); break;
-        case 'halt': case 'burn': case 'hide': if (isMate(e.id) || this.sawInDuel(e.id, squad)) out.push(e); break;
-        case 'nade': out.push(e.squad === squad ? e : { ...e, by: null, fx: null, fy: null, roll: undefined, hits: (e.hits || []).filter((h) => isMate(h.id)) }); break;
-        case 'noise': {
-          if (e.squad === squad) break;
-          if (this.players.some((p) => p.squad === squad && p.alive && dist(p, e) <= 14)) out.push({ ...e, x: e.x + Math.round(this.rng() * 2 - 1), y: e.y + Math.round(this.rng() * 2 - 1) });
-          break;
-        }
-        case 'pickup': case 'drop': if (isMate(e.id) || seenAt(e.id, e.t)) out.push(e); break;
-        case 'defusing': if (isMate(e.id)) out.push(e); break;
+        case 'move': if (e.squad === squad || known.has(e.to)) out.push(e); break;
+        case 'noise': if (e.squad !== squad && near.has(e.zone) && !known.has(e.zone)) out.push(e); break;
+        case 'nade': out.push(e.squad === squad ? e : { ...e, by: null, from: null }); break;
+        case 'roll': case 'shot': case 'hit': case 'retreat': case 'armor': case 'burn': case 'flashed': case 'clash':
+          if (isMate(e.id || e.from || e.to || e.a || e.by) || isMate(e.to) || isMate(e.b) || known.has(e.zone)) out.push(e); break;
+        case 'pickup': case 'drop': if (isMate(e.id) || known.has(e.zone)) out.push(e); break;
+        case 'planfail': if (isMate(e.id)) out.push(e); break;
         default: out.push(e);
       }
     }
     return out;
   }
-
-  // у дуелі учасників бачать усі, хто з ними в контакті
-  sawInDuel(id, squad) {
-    const ev = this.lastEvents || [];
-    return ev.some((e) => e.type === 'burst' && ((e.from === id && this.get(e.to)?.squad === squad) || (e.to === id && this.get(e.from)?.squad === squad)))
-      || (this.lastVis || []).some((v) => v && v[squad] && v[squad].includes(id));
-  }
-}
-
-function nearest(p, list) {
-  let best = null, bd = Infinity;
-  for (const q of list) { const d = dist(p, q); if (d < bd) { bd = d; best = q; } }
-  return best;
-}
-
-function shuffle(a, rng) {
-  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
-  return a;
 }

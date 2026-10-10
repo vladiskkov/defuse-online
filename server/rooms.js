@@ -5,7 +5,7 @@ import { botBuy, botAct } from './game/bot.js';
 import * as R from '../shared/rules.js';
 
 const BOT_NAMES = ['Сашко', 'Марічка', 'Тарас', 'Оксана', 'Богдан', 'Ярина', 'Остап', 'Леся', 'Петро', 'Зоя'];
-const REPLAY_MS = 4200; // скільки клієнт показує повтор ходу чи дуелі
+const REPLAY_MS = 3500; // скільки клієнт показує результат перестрілки
 const ROUND_OVER_MS = 6000;
 
 export class Rooms {
@@ -225,13 +225,13 @@ class Room {
   }
 
   // початок фази руху або дуелі: боти діють одразу, людям — таймер
-  startPhase(afterReplay = false) {
+  startPhase(replayMs = 0) {
     const m = this.match;
     if (m.phase === 'buy') m.endBuy();
     this.botsAct();
     const secs = m.phase === 'duel' ? R.DUEL_SECONDS : R.PLAN_SECONDS;
-    this.phaseOpensAt = Date.now() + (afterReplay ? REPLAY_MS : 0);
-    this.schedule(secs * 1000 + (afterReplay ? REPLAY_MS : 0), () => this.resolve());
+    this.phaseOpensAt = Date.now() + replayMs;
+    this.schedule(secs * 1000 + replayMs, () => this.resolve());
     this.broadcast();
     this.maybeAdvance();
   }
@@ -262,14 +262,15 @@ class Room {
     if (!m || (m.phase !== 'move' && m.phase !== 'duel')) return;
     this.clearTimer();
     let result;
-    try { result = m.phase === 'move' ? m.resolveMove() : m.resolveDuel(); } catch (e) { console.error('resolve failed', e); return; }
+    const kind = m.phase;
+    try { result = m.phase === 'move' ? m.resolveMove() : m.resolveFight(); } catch (e) { console.error('resolve failed', e); return; }
     this.seq += 1;
     if (result.roundEnd) {
       this.broadcast();
       if (m.phase === 'over') { this.deadline = 0; return; }
       this.schedule(REPLAY_MS + ROUND_OVER_MS, () => this.nextRound());
     } else {
-      this.startPhase(true);
+      this.startPhase(kind === 'duel' ? REPLAY_MS : 1500);
     }
   }
 
@@ -342,8 +343,8 @@ class Room {
       v.ready = me.ready;
       v.teamPlans = Object.fromEntries(m.players.filter((q) => q.squad === me.squad && q.id !== uid && q.plan).map((q) => [q.id, q.plan]));
     }
-    const waiting = m.phase === 'duel' ? m.players.filter((p) => !p.isBot && p.alive && p.duel) : m.players.filter((p) => !p.isBot && p.alive);
-    v.readyCount = waiting.filter((p) => (m.phase === 'duel' ? p.duel.ready : p.ready)).length;
+    const waiting = m.phase === 'duel' ? m.players.filter((p) => !p.isBot && p.alive && p.fight) : m.players.filter((p) => !p.isBot && p.alive);
+    v.readyCount = waiting.filter((p) => (m.phase === 'duel' ? p.fight.ready : p.ready)).length;
     v.humanCount = waiting.length;
     return v;
   }
@@ -359,7 +360,7 @@ class Room {
   broadcastLight() {
     const m = this.match;
     if (!m) return;
-    const ready = Object.fromEntries(m.players.map((p) => [p.id, m.phase === 'duel' ? !!(p.duel && p.duel.ready) : !!p.ready]));
+    const ready = Object.fromEntries(m.players.map((p) => [p.id, m.phase === 'duel' ? !!(p.fight && p.fight.ready) : !!p.ready]));
     for (const uid of this.sockets.keys()) this.emitTo(uid, 'ready', { ready, seq: this.seq });
   }
 

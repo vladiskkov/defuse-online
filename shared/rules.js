@@ -1,52 +1,51 @@
-// Правила гри «Дефуз». Спільні для сервера і браузера.
+// Правила настільного «Дефузу». Спільні для сервера і браузера.
 //
-// Раунд складається з ходів руху (10 с ігрового часу) і дуелей (5 с).
-// Хід руху: усі одночасно прокладають маршрут; хто побачив ворога — зупиняється.
-// Дуель: кожен учасник контакту обирає дію і САМ кидає кубики:
-//   стріляти — d20 за кожну кулю черги, ховатися — d20 на ухилення, граната — d20 на точність.
+// Хід: усі одночасно обирають дію — перейти в сусідню зону, тримати позицію,
+// кинути гранату, закласти чи розмінувати бомбу.
+// Якщо вороги опинились в одній зоні — перестрілка: кожен кидає кубики d6,
+// у кого більше, той влучає (нічия — обидва). У кожного 3 ❤.
 
-export const HP = 100;
-export const MOVE_FAST = 6;          // клітинок за хід бігом
-export const MOVE_QUIET = 3;         // клітинок за хід тихо (без шуму)
-export const NADE_MOVE_COST = 2;     // кидок гранати під час руху забирає 2 клітинки
-export const HIDE_STEPS = 2;         // на скільки клітинок можна відскочити в дуелі
-export const ROUND_TIME = 115;       // 1:55 як у CS2
-export const MOVE_TIME = 10;
-export const DUEL_TIME = 5;
-export const BOMB_TIME = 40;
-export const DEFUSE_TIME = 10;
-export const KIT_DEFUSE_TIME = 5;
+export const HP = 3;
+export const TURNS = 12;             // ходів у раунді (1:55)
+export const TURN_SECONDS = 10;      // скільки «ігрових секунд» триває хід
+export const ROUND_TIME = 115;
+export const BOMB_TURNS = 4;         // бомба вибухає через 4 ходи (0:40)
 export const ROUNDS_TOTAL = 12;      // зміна сторін після 6-го раунду
 export const ROUNDS_TO_WIN = 7;
-export const THROW_RANGE = 9;
 export const BUY_SECONDS = 20;
 export const PLAN_SECONDS = 25;
-export const DUEL_SECONDS = 20;
+export const DUEL_SECONDS = 15;
+export const HOLD_BONUS = 1;         // тримав позицію, ворог зайшов до тебе
+export const FLASH_PENALTY = 2;      // осліплений: −2 до суми
+export const RETREAT_SAFE = 4;       // відступ: 4–6 — чисто, 1–3 — мінус 1 ❤
 
-// Зброя як у CS2: шкода за кулю, пробиття броні, множник у голову.
-// bullets — кулі в черзі (кожна = свій кидок d20), aim — бонус до кидка, range — дистанція без штрафу.
+// Зброя: dice — скільки кубиків d6 кидаєш, bonus — до суми,
+// head — коли хедшот: 'double' (дубль), 'six' (шістка); helmetStops — шолом рятує від хедшота
 export const WEAPONS = {
-  glock: { name: 'Glock-18',  slot: 'pistol',  side: 'T',  price: 200,  bullets: 2, dmg: 30, aim: 0, range: 7,  pen: 0.47,  head: 4, kill: 300 },
-  usp:   { name: 'USP-S',     slot: 'pistol',  side: 'CT', price: 200,  bullets: 2, dmg: 35, aim: 1, range: 8,  pen: 0.505, head: 4, kill: 300 },
-  ak47:  { name: 'AK-47',     slot: 'primary', side: 'T',  price: 2700, bullets: 3, dmg: 36, aim: 1, range: 14, pen: 0.775, head: 4, kill: 300 },
-  m4a1s: { name: 'M4A1-S',    slot: 'primary', side: 'CT', price: 2900, bullets: 3, dmg: 38, aim: 2, range: 14, pen: 0.7,   head: 4, kill: 300 },
+  glock: { name: 'Glock-18', slot: 'pistol', side: 'T', price: 0, dice: 1, bonus: 0, head: 'six', helmetStops: true, kill: 300,
+    desc: '1 кубик. Шістка — хедшот, якщо в цілі немає шолома' },
+  usp: { name: 'USP-S', slot: 'pistol', side: 'CT', price: 0, dice: 1, bonus: 0, head: 'six', helmetStops: true, kill: 300,
+    desc: '1 кубик. Шістка — хедшот, якщо в цілі немає шолома' },
+  ak47: { name: 'AK-47', slot: 'primary', side: 'T', price: 2700, dice: 2, bonus: 0, head: 'double', helmetStops: false, kill: 300,
+    desc: '2 кубики. Дубль — хедшот навіть крізь шолом' },
+  m4a1s: { name: 'M4A1-S', slot: 'primary', side: 'CT', price: 2900, dice: 2, bonus: 1, head: 'double', helmetStops: true, kill: 300,
+    desc: '2 кубики +1 до суми. Дубль — хедшот, але шолом рятує' },
 };
 
 export const GRENADES = {
-  he:    { name: 'Осколкова', short: 'HE',   price: 300, radius: 2, desc: 'До 57 шкоди поруч' },
-  flash: { name: 'Флешка',    short: 'Флеш', price: 200, radius: 4, desc: 'Сліпить: −8 до кидків' },
-  smoke: { name: 'Димова',    short: 'Дим',  price: 300, radius: 2, desc: 'Закриває огляд на 30 с' },
-  molly: { name: 'Коктейль',  short: 'Моло', price: 400, radius: 1, desc: 'Вогонь на 20 с, −8 HP за 5 с' },
+  flash: { name: 'Флешка',    icon: '✷', price: 200, desc: 'Вороги в зоні цей хід кидають з −2' },
+  smoke: { name: 'Дим',       icon: '☁', price: 300, desc: 'У зоні 2 ходи ніхто не стріляє — можна пройти' },
+  he:    { name: 'Осколкова', icon: '💥', price: 300, desc: 'Усім ворогам у зоні −1 ❤' },
+  molly: { name: 'Коктейль',  icon: '🔥', price: 400, desc: 'Зона горить 2 ходи: хто в ній — −1 ❤' },
 };
-export const SMOKE_TIME = 30;
-export const FIRE_TIME = 20;
-export const FIRE_DAMAGE = 8;        // за кожні 5 с у вогні
-export const MAX_GRENADES = 3;
+export const MAX_GRENADES = 2;
+export const SMOKE_TURNS = 2;
+export const FIRE_TURNS = 2;
 
 export const GEAR = {
-  vest:   { name: 'Бронежилет',         price: 650 },
-  helmet: { name: 'Бронежилет і шолом', price: 1000 },
-  kit:    { name: 'Набір сапера',       price: 400, side: 'CT' },
+  vest:   { name: 'Бронежилет',         price: 650,  desc: 'Забирає перше влучання в раунді' },
+  helmet: { name: 'Бронежилет і шолом', price: 1000, desc: 'Ще й рятує від хедшота з пістолета і M4' },
+  kit:    { name: 'Набір сапера',       price: 400,  side: 'CT', desc: 'Розміновуєш одразу, як зайшов у зону з бомбою' },
 };
 
 export const ECONOMY = {
@@ -55,70 +54,34 @@ export const ECONOMY = {
   lossBase: 1400, lossStep: 500, lossMax: 3400, plantBonus: 800,
 };
 
-// Модифікатори кидка
-export const BASE_NEED = 10;   // скільки треба викинути (d20 + бонуси) для влучання
-export const SPRAY = 2;        // кожна наступна куля черги −2
-export const COVER = 4;        // ціль за ящиком
-export const HELD = 2;         // тримав кут (не рухався в цей хід) — перший обмін
-export const RAN = 2;          // вибіг на контакт бігом — перший обмін
-export const FLASHED = 8;
-export const HEAD_MARGIN = 10; // хедшот: натуральна 20 або результат ≥ потрібного + 10
-export const HIDE_GOOD = 8;    // вдале ухилення (d20 ≥ 8): по тобі −8
-export const HIDE_BAD = 3;     // невдале: −3, але все одно відходиш
-export const HIDE_ROLL = 8;
-export const NADE_ROLL = 8;    // граната лягає точно, якщо d20 ≥ 8
-
 export function lossBonus(streak) {
   return Math.min(ECONOMY.lossMax, ECONOMY.lossBase + ECONOMY.lossStep * Math.max(0, streak - 1));
 }
-
 export function sideCanBuy(itemSide, side) { return !itemSide || itemSide === side; }
 
-// Розрахунок пострілу: модифікатори і потрібне значення для кожної кулі.
-// o: { weapon, dist, cover, held, ran, flashed, hiding: 0|HIDE_BAD|HIDE_GOOD }
-export function shotSetup(o) {
-  const w = WEAPONS[o.weapon];
-  const mods = [[w.name, w.aim]];
-  if (o.held) mods.push(['Тримав кут', HELD]);
-  if (o.ran) mods.push(['Вибіг на бігу', -RAN]);
-  if (o.flashed) mods.push(['Осліплений', -FLASHED]);
-  const far = Math.max(0, Math.ceil((o.dist - w.range) / 2));
-  if (far) mods.push(['Далеко', -far]);
-  if (o.cover) mods.push(['Ціль за ящиком', -COVER]);
-  if (o.hiding) mods.push([o.hiding === HIDE_GOOD ? 'Ціль ухилилась' : 'Ціль відходить', -o.hiding]);
-  const bonus = mods.reduce((a, m) => a + m[1], 0);
-  return { mods, bonus, need: BASE_NEED, bullets: w.bullets };
-}
-
-// Результат однієї кулі
-export function bulletResult(roll, bonus, need, k) {
-  const total = roll + bonus - SPRAY * k;
-  const hit = roll === 20 || (roll !== 1 && total >= need);
-  const head = hit && (roll === 20 || total >= need + HEAD_MARGIN);
-  return { roll, total, hit, head };
-}
-
-// Шкода кулі з урахуванням броні
-export function bulletDamage(weapon, head, armor) {
+// Бонуси до кидка пострілу
+export function shotBonus({ weapon, held, flashed }) {
   const w = WEAPONS[weapon];
-  let d = w.dmg * (head ? w.head : 1);
-  if (head ? armor >= 2 : armor >= 1) d *= w.pen;
-  return Math.round(d);
+  const mods = [];
+  if (w.bonus) mods.push([w.name, w.bonus]);
+  if (held) mods.push(['Тримав позицію', HOLD_BONUS]);
+  if (flashed) mods.push(['Осліплений', -FLASH_PENALTY]);
+  return { mods, bonus: mods.reduce((a, m) => a + m[1], 0), dice: w.dice };
 }
 
-// Шанс влучити хоча б одною кулею і шанс хедшота (для підказки в інтерфейсі)
-export function shotChance(setup) {
-  let missAll = 1, noHead = 1, perBullet = [];
-  for (let k = 0; k < setup.bullets; k++) {
-    let hit = 0, head = 0;
-    for (let r = 1; r <= 20; r++) {
-      const b = bulletResult(r, setup.bonus, setup.need, k);
-      if (b.hit) hit++;
-      if (b.head) head++;
-    }
-    perBullet.push(hit / 20);
-    missAll *= 1 - hit / 20;
-    noHead *= 1 - head / 20;
-  }
-  return { any: 1 - missAll, head: 1 - noHead, perBullet };
+// Чи це хедшот
+export function isHeadshot(weapon, dice, targetArmor) {
+  const w = WEAPONS[weapon];
+  const head = w.head === 'double' ? dice.length >= 2 && dice[0] === dice[1] : dice.some((d) => d === 6);
+  if (!head) return false;
+  return !(w.helmetStops && targetArmor >= 2);
+}
+
+// Шанс перекинути суперника (для підказки): ймовірність, що моя сума ≥ його
+export function winChance(myDice, myBonus, theirDice, theirBonus) {
+  const dist = (n) => { let d = { 0: 1 }; for (let i = 0; i < n; i++) { const nd = {}; for (const [s, p] of Object.entries(d)) for (let f = 1; f <= 6; f++) nd[+s + f] = (nd[+s + f] || 0) + p / 6; d = nd; } return d; };
+  const a = dist(myDice), b = dist(theirDice);
+  let p = 0;
+  for (const [x, px] of Object.entries(a)) for (const [y, py] of Object.entries(b)) if (+x + myBonus >= +y + theirBonus) p += px * py;
+  return p;
 }
