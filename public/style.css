@@ -36,7 +36,9 @@ h2 { font-size: 20px; } h3 { font-size: 17px; }
 
 #login { display: grid; place-items: center; padding: 16px;
   background: radial-gradient(ellipse at 50% 0%, #3a2c18 0%, var(--bg) 60%); }
-.hero { max-width: 420px; width: 100%; text-align: center; padding: 28px 22px; }
+.hero { max-width: 420px; width: 100%; min-width: 0; text-align: center; padding: 28px 22px; }
+#login { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+.gbtn { overflow: hidden; max-width: 100%; }
 .hero .logo { justify-content: center; }
 .tag { color: var(--muted); margin: 8px 0 22px; }
 .gbtn { display: flex; justify-content: center; min-height: 44px; }
