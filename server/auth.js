@@ -5,6 +5,8 @@ import { OAuth2Client } from 'google-auth-library';
 const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 export const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 export const ALLOW_GUESTS = process.env.ALLOW_GUESTS !== 'false';
+// версія збірки: після деплою відкриті вкладки перезавантажаться самі
+export const VERSION = process.env.RENDER_GIT_COMMIT || String(Date.now());
 const COOKIE = 'dfz';
 const MAX_AGE = 30 * 24 * 3600 * 1000;
 const google = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
@@ -52,7 +54,7 @@ export function cleanName(name) {
 }
 
 export function mountAuth(app) {
-  app.get('/api/config', (req, res) => res.json({ googleClientId: GOOGLE_CLIENT_ID, allowGuests: ALLOW_GUESTS }));
+  app.get('/api/config', (req, res) => res.json({ googleClientId: GOOGLE_CLIENT_ID, allowGuests: ALLOW_GUESTS, version: VERSION }));
 
   app.get('/api/me', (req, res) => res.json({ user: userFromCookieHeader(req.headers.cookie) }));
 

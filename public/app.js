@@ -74,7 +74,9 @@ function connect() {
   $('meName').textContent = me.name;
   socket = io({ transports: ['websocket', 'polling'] });
   socket.on('connect_error', (e) => { if (e.message === 'unauthorized') { socket.disconnect(); showLogin(); } });
-  socket.on('hello', ({ room: code }) => {
+  socket.on('hello', ({ room: code, version }) => {
+    // сервер оновився, а вкладка ще зі старим кодом — перезавантажуємось
+    if (version && config.version && version !== config.version) { location.reload(); return; }
     if (code) return; // стан кімнати прийде окремо
     room = null;
     const invite = new URLSearchParams(location.search).get('r');

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import compression from 'compression';
 import { Server } from 'socket.io';
-import { mountAuth, userFromCookieHeader } from './auth.js';
+import { mountAuth, userFromCookieHeader, VERSION } from './auth.js';
 import { Rooms } from './rooms.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -23,9 +23,11 @@ app.use((req, res, next) => {
 
 app.get('/healthz', (req, res) => res.send('ok'));
 mountAuth(app);
-app.use('/shared', express.static(path.join(root, '../shared'), { maxAge: '1h' }));
+// код гри браузер щоразу перевіряє (ETag), щоб після оновлення ніхто не застряг на старій версії
+const fresh = { etag: true, lastModified: true, setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') };
+app.use('/shared', express.static(path.join(root, '../shared'), fresh));
 app.use('/vendor/three', express.static(path.join(root, '../node_modules/three/build'), { maxAge: '7d' }));
-app.use(express.static(path.join(root, '../public'), { maxAge: '1h', extensions: ['html'] }));
+app.use(express.static(path.join(root, '../public'), { ...fresh, extensions: ['html'] }));
 
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 32_000, pingInterval: 20000, pingTimeout: 25000 });
@@ -56,7 +58,7 @@ io.on('connection', (socket) => {
   const allow = limiter(socket);
   let room = rooms.roomOf(uid);
   if (room) room.attach(socket);
-  socket.emit('hello', { user: socket.user, room: room ? room.code : null });
+  socket.emit('hello', { user: socket.user, room: room ? room.code : null, version: VERSION });
 
   const on = (ev, fn) => socket.on(ev, (data, cb) => {
     if (!allow()) return typeof cb === 'function' && cb({ ok: false, error: 'Забагато дій, зачекайте секунду' });
