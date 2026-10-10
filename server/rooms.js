@@ -1,7 +1,7 @@
 // Кімнати: лобі, місця в командах, боти, таймери фаз матчу.
 import crypto from 'node:crypto';
 import { Match } from './game/engine.js';
-import { botBuy, botAct } from './game/bot.js';
+import { botBuy, botStep } from './game/bot.js';
 import * as R from '../shared/rules.js';
 
 const BOT_NAMES = ['Сашко', 'Марічка', 'Тарас', 'Оксана', 'Богдан', 'Ярина', 'Остап', 'Леся', 'Петро', 'Зоя'];
@@ -99,6 +99,8 @@ class Room {
       const p = this.match.get(socket.user.id);
       if (p) p.connected = false;
       this.maybeAdvance();
+      const w = this.match.waitingFor();
+      if (w && w.id === socket.user.id) { this.advance(); return; }
     }
     this.broadcast();
   }
@@ -136,6 +138,7 @@ class Room {
     if (!humans.length) { this.destroy(); this.rooms.rooms.delete(this.code); return; }
     if (this.hostId === uid) this.hostId = humans[0].id;
     this.maybeAdvance();
+    if (this.match && this.match.phase === 'play') { const w = this.match.waitingFor(); if (w && w.id === uid) { this.advance(); return; } }
     this.broadcast();
   }
 
@@ -219,27 +222,46 @@ class Room {
   nextRound() {
     const m = this.match;
     m.startRound();
+    this.evCursor = 0;
     for (const p of m.players) if (p.isBot) { botBuy(m, p); p.ready = true; }
-    this.schedule(R.BUY_SECONDS * 1000, () => this.startPhase());
+    this.schedule(R.BUY_SECONDS * 1000, () => this.beginPlay());
     this.broadcast();
   }
 
-  // початок фази руху або дуелі: боти діють одразу, людям — таймер
-  startPhase(replayMs = 0) {
+  beginPlay() {
     const m = this.match;
-    if (m.phase === 'buy') m.endBuy();
-    this.botsAct();
-    const secs = m.phase === 'duel' ? R.DUEL_SECONDS : R.PLAN_SECONDS;
-    this.phaseOpensAt = Date.now() + replayMs;
-    this.schedule(secs * 1000 + replayMs, () => this.resolve());
-    this.broadcast();
-    this.maybeAdvance();
+    if (!m || m.phase !== 'buy') return;
+    m.endBuy();
+    this.advance();
   }
 
-  botsAct() {
+  // після кожної дії: розсилка і таймер для наступного, хто має діяти
+  advance(extraDelay = 0) {
     const m = this.match;
-    for (const p of m.players) if (p.isBot && p.alive) {
-      try { botAct(m, p); } catch (e) { console.error('bot', e); if (m.phase === 'move') m.setPlan(p.id, { ready: true }); else m.autoDuel(p); }
+    if (!m) return;
+    const fresh = m.events.slice(this.evCursor || 0);
+    this.broadcast();
+    if (m.phase === 'roundOver') { this.schedule(ROUND_OVER_MS + 2500, () => this.nextRound()); return; }
+    if (m.phase === 'over') { this.clearTimer(); this.deadline = 0; return; }
+    const w = m.waitingFor();
+    if (!w) return;
+    const p = m.get(w.id);
+    // пауза, щоб усі встигли побачити рух і кубики
+    let pause = 450;
+    for (const e of fresh) {
+      if (e.type === 'move') pause = Math.max(pause, 500 + e.path.length * 330);
+      if (e.type === 'result') pause = Math.max(pause, 2600);
+      if (e.type === 'atkroll') pause = Math.max(pause, 1100);
+      if (e.type === 'nade') pause = Math.max(pause, 1200);
+    }
+    pause += extraDelay;
+    const auto = () => { try { m.timeout(); } catch (e) { console.error('timeout', e); } this.advance(); };
+    if (p.isBot) {
+      this.schedule(pause, () => { try { botStep(m); } catch (e) { console.error('bot', e); m.timeout(); } this.advance(); });
+    } else if (!p.connected || !this.sockets.has(p.id)) {
+      this.schedule(pause + 2500, auto);
+    } else {
+      this.schedule(w.seconds * 1000 + pause, auto);
     }
   }
 
@@ -247,31 +269,8 @@ class Room {
     const m = this.match;
     if (!m || this.status !== 'playing') return;
     const humans = m.players.filter((p) => !p.isBot && p.connected);
-    if (!humans.length) return; // нікого немає — чекаємо таймера
-    if (m.phase === 'buy' && humans.every((p) => p.ready)) {
-      this.schedule(600, () => this.startPhase());
-    } else if ((m.phase === 'move' || m.phase === 'duel') && m.allReady()) {
-      // не розігруємо, поки клієнти ще показують повтор попередньої фази
-      const wait = Math.max(400, (this.phaseOpensAt || 0) - Date.now());
-      this.schedule(wait, () => this.resolve());
-    }
-  }
-
-  resolve() {
-    const m = this.match;
-    if (!m || (m.phase !== 'move' && m.phase !== 'duel')) return;
-    this.clearTimer();
-    let result;
-    const kind = m.phase;
-    try { result = m.phase === 'move' ? m.resolveMove() : m.resolveFight(); } catch (e) { console.error('resolve failed', e); return; }
-    this.seq += 1;
-    if (result.roundEnd) {
-      this.broadcast();
-      if (m.phase === 'over') { this.deadline = 0; return; }
-      this.schedule(REPLAY_MS + ROUND_OVER_MS, () => this.nextRound());
-    } else {
-      this.startPhase(kind === 'duel' ? REPLAY_MS : 1500);
-    }
+    if (!humans.length) return;
+    if (m.phase === 'buy' && humans.every((p) => p.ready)) this.schedule(500, () => this.beginPlay());
   }
 
   /* ---------- дії гравців у матчі ---------- */
@@ -289,33 +288,18 @@ class Room {
     this.broadcast();
     this.maybeAdvance();
   }
-  plan(uid, plan) {
+  act(uid, a) {
     const m = this.match;
-    if (!m || m.phase !== 'move') return { ok: false };
-    const p = m.get(uid);
-    if (!p || p.isBot) return { ok: false };
-    const r = m.setPlan(uid, plan);
-    if (!r.ok) return r;
-    // план бачать тіммейти
-    for (const q of m.players) if (q.squad === p.squad && q.id !== uid) this.emitTo(q.id, 'teamPlan', { id: uid, plan: r.plan, ready: p.ready });
-    this.broadcastLight();
-    this.maybeAdvance();
-    return { ok: true, plan: r.plan };
-  }
-  duelAct(uid, data) {
-    const m = this.match;
-    if (!m || m.phase !== 'duel') return { ok: false, error: 'Дуель уже закінчилась' };
-    const r = m.duelAct(uid, data || {});
-    if (r.ok) this.sendTo(uid);
+    if (!m || m.phase !== 'play') return { ok: false, error: 'Зараз не можна' };
+    const r = m.act(uid, a || {});
+    if (r.ok) this.advance();
     return r;
   }
-  duelRoll(uid) {
+  roll(uid) {
     const m = this.match;
-    if (!m || m.phase !== 'duel') return { ok: false };
-    const r = m.duelRoll(uid);
-    if (!r.ok) return r;
-    this.broadcastLight();
-    this.maybeAdvance();
+    if (!m || m.phase !== 'play') return { ok: false };
+    const r = m.roll(uid);
+    if (r.ok) this.advance();
     return r;
   }
 
@@ -329,39 +313,27 @@ class Room {
     };
   }
 
-  viewFor(uid) {
+  viewFor(uid, since) {
     const m = this.match;
     if (!m) return null;
-    const v = m.viewFor(uid);
+    const v = m.viewFor(uid, since ?? m.events.length);
     v.seq = this.seq;
     v.deadline = this.deadline;
     v.now = Date.now();
-    // готовність команди і власний план
-    const me = m.get(uid);
-    if (me) {
-      v.myPlan = me.plan;
-      v.ready = me.ready;
-      v.teamPlans = Object.fromEntries(m.players.filter((q) => q.squad === me.squad && q.id !== uid && q.plan).map((q) => [q.id, q.plan]));
-    }
-    const waiting = m.phase === 'duel' ? m.players.filter((p) => !p.isBot && p.alive && p.fight) : m.players.filter((p) => !p.isBot && p.alive);
-    v.readyCount = waiting.filter((p) => (m.phase === 'duel' ? p.fight.ready : p.ready)).length;
-    v.humanCount = waiting.length;
     return v;
   }
 
-  sendTo(uid) {
+  sendTo(uid, since) {
     this.emitTo(uid, 'room', this.lobbyState());
-    if (this.match) this.emitTo(uid, 'game', this.viewFor(uid));
+    if (this.match) this.emitTo(uid, 'game', this.viewFor(uid, since));
   }
 
-  broadcast() { for (const uid of this.sockets.keys()) this.sendTo(uid); }
-
-  // лише лічильник готовності, без повтору подій
-  broadcastLight() {
-    const m = this.match;
-    if (!m) return;
-    const ready = Object.fromEntries(m.players.map((p) => [p.id, m.phase === 'duel' ? !!(p.fight && p.fight.ready) : !!p.ready]));
-    for (const uid of this.sockets.keys()) this.emitTo(uid, 'ready', { ready, seq: this.seq });
+  // розсилка: кожен отримує нові події з моменту попередньої розсилки
+  broadcast() {
+    const since = this.evCursor || 0;
+    if (this.match && this.match.events.length > since) this.seq += 1;
+    for (const uid of this.sockets.keys()) this.sendTo(uid, since);
+    if (this.match) this.evCursor = this.match.events.length;
   }
 
   destroy() { this.clearTimer(); }
