@@ -1,0 +1,23 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: defuse-online
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: SESSION_SECRET
+        generateValue: true
+      # Client ID публічний (він і так видно на сторінці), секрет не потрібен
+      - key: GOOGLE_CLIENT_ID
+        value: 96122002055-12t0takn8c80cb4u530epn1ti05lh8v8.apps.googleusercontent.com
+      - key: ALLOW_GUESTS
+        value: "true"

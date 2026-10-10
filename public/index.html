@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#1b1712">
+  <title>Дефуз — тактика на кубиках</title>
+  <meta name="description" content="Покрокова командна гра: закупівля, гранати, бомба і дуелі на кубиках. 1×1, 2×2 або 3×3 з друзями чи ботами.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e8a33d'/%3E%3Ccircle cx='11' cy='11' r='3' fill='%231b1712'/%3E%3Ccircle cx='21' cy='21' r='3' fill='%231b1712'/%3E%3Ccircle cx='21' cy='11' r='3' fill='%231b1712'/%3E%3Ccircle cx='11' cy='21' r='3' fill='%231b1712'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+  <!-- Вхід -->
+  <section class="screen" id="login" hidden>
+    <div class="card hero">
+      <div class="logo"><span class="die">⚄</span> ДЕФУЗ</div>
+      <p class="tag">Командна тактика на кубиках. Закупка, гранати, бомба — і кожен постріл вирішує d20.</p>
+      <div id="googleBtn" class="gbtn"></div>
+      <div class="or" id="guestOr" hidden><span>або</span></div>
+      <form id="guestForm" class="row" hidden>
+        <input id="guestName" maxlength="20" placeholder="Ваше ім'я" autocomplete="nickname">
+        <button class="btn" type="submit">Грати як гість</button>
+      </form>
+      <p class="error" id="loginError" hidden></p>
+      <p class="muted small foot"><a href="/privacy">Конфіденційність</a> · <a href="/terms">Умови</a></p>
+    </div>
+  </section>
+
+  <!-- Головна -->
+  <section class="screen" id="home" hidden>
+    <header class="bar">
+      <div class="logo small"><span class="die">⚄</span> ДЕФУЗ</div>
+      <div class="who"><span id="meName"></span><button class="link" id="logoutBtn">Вийти</button></div>
+    </header>
+    <div class="wrap">
+      <div class="card">
+        <h2>Грати</h2>
+        <div class="field">
+          <span class="label">Формат</span>
+          <div class="seg" id="sizeSeg">
+            <button data-size="1" class="on">1 × 1</button>
+            <button data-size="2">2 × 2</button>
+            <button data-size="3">3 × 3</button>
+          </div>
+        </div>
+        <div class="stack">
+          <button class="btn primary big" id="soloBtn">Гра з ботами</button>
+          <button class="btn big" id="createBtn">Кімната для друзів</button>
+        </div>
+        <form class="row join" id="joinForm">
+          <input id="joinCode" maxlength="5" placeholder="Код кімнати" autocapitalize="characters" autocomplete="off">
+          <button class="btn" type="submit">Увійти</button>
+        </form>
+        <p class="error" id="homeError" hidden></p>
+      </div>
+      <details class="card rules">
+        <summary><h2>Як грати</h2></summary>
+        <ul>
+          <li><b>Карта «Дюна»</b>: точки А і Б, мід, лонг, тунелі. Команда T закладає бомбу, CT не дають або розміновують.</li>
+          <li><b>Ходи одночасні.</b> Усі таємно планують хід, потім рухи розігруються разом — по клітинці за такт.</li>
+          <li><b>Режим руху:</b> біг (4 клітинки, гучно), крок (2, тихо), тримати кут (стоїш і стріляєш першим, коли ворог з'являється), ухилення (не зупиняєшся і в тебе важче влучити).</li>
+          <li><b>Постріл:</b> d20 + влучність зброї проти складності: дистанція, укриття за ящиком, рух цілі. 20 — хедшот, 1 — промах. Шкода — кубики зброї, броня її зменшує.</li>
+          <li><b>Гранати</b> летять на початку ходу: дим ховає, флешка сліпить (−8 до кидка), осколкова б'є по площі, коктейль палає 2 ходи.</li>
+          <li><b>Бомба:</b> закладка забирає хід, вибух через 7 ходів. Розмінування — 2 ходи, з набором сапера — 1.</li>
+          <li><b>Гроші:</b> за перемогу, за вбивство і бонус за поразки поспіль. До 7 перемог, після 6 раундів — зміна сторін.</li>
+        </ul>
+      </details>
+    </div>
+  </section>
+
+  <!-- Лобі кімнати -->
+  <section class="screen" id="lobby" hidden>
+    <header class="bar">
+      <button class="link" id="leaveLobby">← Вийти</button>
+      <div class="code">Кімната <b id="roomCode"></b></div>
+      <button class="link" id="copyInvite">Запросити</button>
+    </header>
+    <div class="wrap">
+      <div class="card">
+        <div class="field" id="lobbySizeField">
+          <span class="label">Формат</span>
+          <div class="seg" id="lobbySize">
+            <button data-size="1">1 × 1</button>
+            <button data-size="2">2 × 2</button>
+            <button data-size="3">3 × 3</button>
+          </div>
+        </div>
+        <div class="teams" id="teams"></div>
+        <p class="muted small" id="lobbyHint"></p>
+        <button class="btn primary big" id="startBtn">Почати матч</button>
+        <p class="error" id="lobbyError" hidden></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Гра -->
+  <section class="screen game" id="game" hidden>
+    <header class="hud">
+      <div class="score"><span class="t" id="scoreT">0</span><span class="sep">:</span><span class="ct" id="scoreCT">0</span></div>
+      <div class="mid">
+        <div class="phase" id="phaseLabel"></div>
+        <div class="sub" id="phaseSub"></div>
+      </div>
+      <div class="timer" id="timer">--</div>
+      <button class="icon" id="menuBtn" aria-label="Меню">☰</button>
+    </header>
+    <div class="board" id="board">
+      <canvas id="canvas"></canvas>
+      <div class="zoom">
+        <button class="icon" id="zoomIn" aria-label="Наблизити">+</button>
+        <button class="icon" id="zoomOut" aria-label="Віддалити">−</button>
+        <button class="icon" id="zoomMe" aria-label="До мене">◎</button>
+      </div>
+      <div class="feed" id="feed"></div>
+      <button class="logbtn" id="logBtn">Журнал</button>
+    </div>
+    <div class="panel" id="panel"></div>
+
+    <div class="sheet" id="buySheet" hidden></div>
+    <div class="sheet" id="logSheet" hidden>
+      <div class="sheet-head"><h3>Журнал ходу</h3><button class="icon" data-close>✕</button></div>
+      <div class="log" id="log"></div>
+    </div>
+    <div class="sheet" id="menuSheet" hidden></div>
+    <div class="overlay" id="roundOverlay" hidden></div>
+  </section>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/socket.io/socket.io.min.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
